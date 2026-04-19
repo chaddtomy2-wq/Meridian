@@ -36,7 +36,7 @@
     const SCHEMA_VERSION = 1;
 
     // ─── CONFIG ─────────────────────────────────────────────────────────────────
-    const GOOGLE_CLIENT_ID = "56580302145-bpb8f37tb8g173a4d5mn7sgenrb5jorl.apps.googleusercontent.com";
+    const GOOGLE_CLIENT_ID = "822050587129-v3f9bac75aas92amatsa1tgvt8oavh38.apps.googleusercontent.com";
     const firebaseConfig = {
       apiKey:            "AIzaSyDccQp1ZD4J9ahGekHL9zFUE444dA8eoco",
       authDomain:        "meridian-90661.firebaseapp.com",
@@ -50,13 +50,13 @@
     const IS_SANDBOX = !window.location.hostname.includes("github.io") &&
                        !window.location.hostname.includes("meridian-90661");
 
-    // ─── FIREBASE (production only) ──────────────────────────────────────────────
-    let db = null, auth = null;
-    if (!IS_SANDBOX) {
-      firebase.initializeApp(firebaseConfig);
-      db   = firebase.firestore();
-      auth = firebase.auth();
-    }
+    // ─── FIREBASE (singleton pattern) ───────────────────────────────────────────
+    const getApp = () => {
+      if (!window._fbApp) window._fbApp = firebase.initializeApp(firebaseConfig);
+      return window._fbApp;
+    };
+    const getAuth = () => IS_SANDBOX ? null : firebase.auth(getApp());
+    const getDb   = () => IS_SANDBOX ? null : firebase.firestore(getApp());
 
     // ─── STORAGE HELPERS ────────────────────────────────────────────────────────
     function saveDay(uid, date, data) {
@@ -65,7 +65,7 @@
         all[date] = data;
         localStorage.setItem("meridian_daydata", JSON.stringify(all));
       } else {
-        db.collection("users").doc(uid).collection("dayData").doc(date).set(data, { merge: true });
+        getDb().collection("users").doc(uid).collection("dayData").doc(date).set(data, { merge: true });
       }
     }
 
@@ -2398,8 +2398,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {
       const [user, setUser]            = useState(null);
       const [loading, setLoading]      = useState(!IS_SANDBOX);
       const [dayData, setDayDataState] = useState(null);
-      const uidRef   = useRef(null);
-      const unsubRef = useRef(null);
+      const uidRef = useRef(null);
 
       function setDayData(updater) {
         setDayDataState(prev => {
@@ -2415,6 +2414,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {
         });
       }
 
+      // Auth state listener
       useEffect(() => {
         if (IS_SANDBOX) {
           uidRef.current = "local";
@@ -2423,55 +2423,67 @@ function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {
           setUser({ uid: "local", name: "Chadd" });
           return;
         }
-
+        const auth = getAuth();
         auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
-          auth.onAuthStateChanged(u => {
+          const unsub = auth.onAuthStateChanged(u => {
+            setUser(u);
             setLoading(false);
-            if (u) {
-              uidRef.current = u.uid;
-              setUser(u);
-              const colRef = db.collection("users").doc(u.uid).collection("dayData");
-              if (unsubRef.current) unsubRef.current();
-              unsubRef.current = colRef.onSnapshot(snap => {
-                if (snap.empty) {
-                  const seedData = buildInitialDayData();
-                  const batch = db.batch();
-                  Object.entries(seedData).forEach(([date, data]) => {
-                    batch.set(colRef.doc(date), data);
-                  });
-                  batch.commit();
-                  setDayDataState(seedData);
-                } else {
-                  const data = {};
-                  snap.forEach(doc => { data[doc.id] = doc.data(); });
-                  setDayDataState(data);
-                }
-              }, err => console.error("Firestore error:", err));
-            } else {
-              setUser(null);
-              setDayDataState(null);
-              if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
-            }
           });
+          return () => unsub();
         });
       }, []);
 
+      // Data listener — fires when user changes
+      useEffect(() => {
+        if (IS_SANDBOX || !user) return;
+        const db = getDb();
+        const userDocRef = db.collection("users").doc(user.uid);
+        uidRef.current = user.uid;
+        let didSeed = false;
+
+        userDocRef.get().then(userMeta => {
+          const isInitialized = userMeta.exists && userMeta.data()?.initialized;
+          const unsub = userDocRef.collection("dayData").onSnapshot(snap => {
+            if (snap.empty && !isInitialized && !didSeed) {
+              didSeed = true;
+              const seedData = buildInitialDayData();
+              const batch = db.batch();
+              Object.entries(seedData).forEach(([date, data]) => {
+                batch.set(userDocRef.collection("dayData").doc(date), data);
+              });
+              batch.set(userDocRef, { initialized: true }, { merge: true });
+              batch.commit();
+            } else {
+              const data = {};
+              snap.forEach(doc => { data[doc.id] = doc.data(); });
+              setDayDataState(data);
+            }
+          }, err => console.error("Firestore error:", err));
+          window._fbUnsub = unsub;
+        });
+
+        return () => { if (window._fbUnsub) window._fbUnsub(); };
+      }, [user]);
+
       function handleSignIn() {
-        const client = google.accounts.oauth2.initTokenClient({
+        const tokenClient = google.accounts.oauth2.initTokenClient({
           client_id: GOOGLE_CLIENT_ID,
           scope: "email profile",
           callback: async (resp) => {
-            if (resp.error) { alert("Sign in error: " + resp.error); return; }
-            const cred = firebase.auth.GoogleAuthProvider.credential(null, resp.access_token);
-            auth.signInWithCredential(cred).catch(err => alert("Firebase error: " + err.message));
+            if (resp.error) { console.error("Sign in error:", resp); return; }
+            try {
+              const auth = getAuth();
+              const cred = firebase.auth.GoogleAuthProvider.credential(null, resp.access_token);
+              await auth.signInWithCredential(cred);
+            } catch (err) { console.error("Firebase credential error:", err); }
           },
         });
-        client.requestAccessToken();
+        tokenClient.requestAccessToken();
       }
 
       function handleSignOut() {
-        if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
-        if (!IS_SANDBOX) auth.signOut();
+        if (window._fbUnsub) window._fbUnsub();
+        if (!IS_SANDBOX) getAuth().signOut();
         setUser(null);
         setDayDataState(null);
       }
