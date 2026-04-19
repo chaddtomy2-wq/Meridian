@@ -36,7 +36,7 @@
     const SCHEMA_VERSION = 1;
 
     // ─── CONFIG ─────────────────────────────────────────────────────────────────
-    const GOOGLE_CLIENT_ID = "723669098116-dad1piko79i9fr3eddcgb60q28dmro0t.apps.googleusercontent.com";
+    const GOOGLE_CLIENT_ID = "614878832014-01vorik4kp4k7kbagvqtnvpv06r8rtn0.apps.googleusercontent.com";
     const firebaseConfig = {
       apiKey:            "AIzaSyDccQp1ZD4J9ahGekHL9zFUE444dA8eoco",
       authDomain:        "meridian-90661.firebaseapp.com",
@@ -76,19 +76,9 @@
         callback({ ...buildInitialDayData(), ...stored });
       } else {
         db.collection("users").doc(uid).collection("dayData").get().then(snap => {
-          if (snap.empty) {
-            // First sign-in — seed historical data to Firestore
-            const seedData = buildInitialDayData();
-            const batch = db.batch();
-            Object.entries(seedData).forEach(([date, data]) => {
-              batch.set(db.collection("users").doc(uid).collection("dayData").doc(date), data);
-            });
-            batch.commit().then(() => callback(seedData));
-          } else {
-            const data = {};
-            snap.forEach(doc => { data[doc.id] = doc.data(); });
-            callback(data);
-          }
+          const data = buildInitialDayData();
+          snap.forEach(doc => { data[doc.id] = doc.data(); });
+          callback(data);
         });
       }
     }
@@ -130,17 +120,28 @@ const DANGER  = "#e05a4e";
 // ─── DATE UTILS ───────────────────────────────────────────────────────────────
 // 4am logical day boundary
 function getLogicalDate(dayBoundaryHour = 0) {
-  const now = new Date();
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Toronto" }));
   if (now.getHours() < dayBoundaryHour) {
     now.setDate(now.getDate() - 1);
   }
-  return now.toISOString().slice(0, 10);
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function dateStr(offset = 0) {
   const d = new Date();
   d.setDate(d.getDate() + offset);
   return d.toISOString().slice(0, 10);
+}
+
+function localDateStr(d) {
+  const dt = new Date((d || new Date()).toLocaleString("en-US", { timeZone: "America/Toronto" }));
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const day = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 function formatTimeLabel(mins) {
@@ -796,6 +797,8 @@ function TabDawn({ dayData, setDayData, routine, setRoutine }) {
 
   const logicalToday = getLogicalDate(1);
   const completed = routine.filter(r => r.done).length;
+  // DEBUG
+  console.log('logicalToday:', logicalToday, 'weight in dayData:', dayData[logicalToday]?.weight);
   const allDone   = completed === routine.length;
 
   // ── Scroll handler — drives the sunrise gradient ─────────────────────────
@@ -1086,7 +1089,7 @@ function TabDawn({ dayData, setDayData, routine, setRoutine }) {
               onTimerStart={() => startTimer(item)}
               onWeightChange={val => {
                 setRoutine(r => r.map(i => i.id === item.id ? { ...i, value:val, done:!!val } : i));
-                if (val) setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), weight: parseFloat(val) } }));
+                if (val) { const w = parseFloat(val); if (!isNaN(w)) setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), weight: w } })); }
               }}
               onJournalChange={v => updateJournal(item.id, v)}
               onJournalSave={() => setRoutine(r => r.map(i => i.id === item.id ? { ...i, saved:true, done:true } : i))}
@@ -1599,6 +1602,7 @@ function WeightChart({ weightEntries, minW, maxW }) {
   const CHART_H = 150, Y_W = 36, TOP = 30, BOT = 20;
   const firstDate = new Date(weightEntries[0][0]);
   const today = new Date();
+  const todayKey = localDateStr(today);
   const todayIdx  = Math.round((today - firstDate) / 86400000);
   const totalDays = todayIdx + 1;
 
@@ -1733,7 +1737,7 @@ function CyclingChart({ rideEntries }) {
   const svgW = totalDays * DAY_W + 8;
   const svgH = TOP + CHART_H + BOT;
 
-  const todayMonth = new Date().toISOString().slice(0,7);
+  const todayMonth = localDateStr(new Date()).slice(0,7);
 
 
   return (
@@ -1809,6 +1813,7 @@ function MoodChart({ moodEntries }) {
   const today = new Date();
   const totalDays = Math.round((today - firstDate) / 86400000) + 1;
   const todayIdx  = totalDays - 1;
+  const todayKey = localDateStr(today);
 
   const moodMap = {};
   moodEntries.forEach(([k, d]) => { moodMap[k] = d.mood; });
@@ -2258,7 +2263,7 @@ function TabProfile({ dayData, setDayData, onSignOut }) {
         {/* Account */}
         <div className="fu4 glass" style={{ padding:"16px 18px" }}>
           <Lbl>Account</Lbl>
-          <button onClick={onSignOut} style={{ width:"100%", padding:"11px", borderRadius:10, background:"rgba(224,90,78,0.06)", border:"1px solid rgba(224,90,78,0.25)", color:DANGER, fontSize:12 }}>
+          <button style={{ width:"100%", padding:"11px", borderRadius:10, background:"rgba(224,90,78,0.06)", border:"1px solid rgba(224,90,78,0.25)", color:DANGER, fontSize:12 }}>
             Sign Out
           </button>
           <div style={{ marginTop:10, fontSize:10, color:TEXT3, textAlign:"center" }}>
@@ -2320,8 +2325,11 @@ function NavBar({ active, setTab }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // APP ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
-function App({ dayData, setDayData, onSignOut }) {
+export default function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
   const [tab, setTab]       = useState(0);
+  const [_dayData, _setDayData] = useState(buildInitialDayData);
+  const dayData    = propDayData    || _dayData;
+  const setDayData = propSetDayData || _setDayData;
 
   // Reset checkboxes on new logical day, keep labels/types
   const todayKey = getLogicalDate(1);
@@ -2373,12 +2381,12 @@ function App({ dayData, setDayData, onSignOut }) {
     touchStartX.current = null; touchStartY.current = null;
   }
 
-  function renderTab() {
-    if (tab === 0) return <TabChain   dayData={dayData} stars={stars} />;
-    if (tab === 1) return <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />;
-    if (tab === 2) return <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />;
-    if (tab === 3) return <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />;
-  }
+  const tabComponents = [
+    <TabChain   dayData={dayData} stars={stars} />,
+    <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
+    <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
+    <TabProfile dayData={dayData} setDayData={setDayData} />,
+  ];
 
   return (
     <div style={{ display:"flex", justifyContent:"center", minHeight:"100vh", background:"#000" }}>
@@ -2401,16 +2409,16 @@ function App({ dayData, setDayData, onSignOut }) {
 
     // ─── AUTH WRAPPER ───────────────────────────────────────────────────────────
     function AuthGate() {
-      const [user, setUser]         = useState(null);
-      const [loading, setLoading]   = useState(!IS_SANDBOX);
+      const [user, setUser]     = useState(null);
+      const [loading, setLoading] = useState(!IS_SANDBOX);
       const [dayData, setDayDataState] = useState(null);
-      const uidRef    = useRef(null);
-      const unsubRef  = useRef(null);
+      const uidRef = useRef(null);
 
-      // setDayData — writes to Firestore (prod) or localStorage (sandbox)
+      // Wrap setDayData to also persist to storage
       function setDayData(updater) {
         setDayDataState(prev => {
           const next = typeof updater === "function" ? updater(prev) : updater;
+          // Persist changed days
           if (uidRef.current) {
             Object.keys(next).forEach(date => {
               if (!prev || JSON.stringify(prev[date]) !== JSON.stringify(next[date])) {
@@ -2425,47 +2433,21 @@ function App({ dayData, setDayData, onSignOut }) {
       useEffect(() => {
         if (IS_SANDBOX) {
           uidRef.current = "local";
-          const stored = JSON.parse(localStorage.getItem("meridian_daydata") || "{}");
-          setDayDataState({ ...buildInitialDayData(), ...stored });
+          loadAllDays("local", data => setDayDataState(data));
           setUser({ uid:"local", name:"Chadd" });
           return;
         }
-
-        // Set auth persistence so user stays signed in across sessions
-        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
-          const unsub = auth.onAuthStateChanged(u => {
-            setLoading(false);
-            if (u) {
-              uidRef.current = u.uid;
-              setUser(u);
-
-              // Use onSnapshot for real-time data sync
-              const colRef = db.collection("users").doc(u.uid).collection("dayData");
-              if (unsubRef.current) unsubRef.current();
-              unsubRef.current = colRef.onSnapshot(snap => {
-                if (snap.empty) {
-                  // First sign-in — seed historical data
-                  const seedData = buildInitialDayData();
-                  const batch = db.batch();
-                  Object.entries(seedData).forEach(([date, data]) => {
-                    batch.set(colRef.doc(date), data);
-                  });
-                  batch.commit();
-                  setDayDataState(seedData);
-                } else {
-                  const data = {};
-                  snap.forEach(doc => { data[doc.id] = doc.data(); });
-                  setDayDataState(data);
-                }
-              }, err => console.error("Firestore error:", err));
-            } else {
-              setUser(null);
-              setDayDataState(null);
-              if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
-            }
-          });
-          return unsub;
+        const unsub = auth.onAuthStateChanged(u => {
+          setLoading(false);
+          if (u) {
+            uidRef.current = u.uid;
+            setUser(u);
+            loadAllDays(u.uid, data => setDayDataState(data));
+          } else {
+            setUser(null);
+          }
         });
+        return unsub;
       }, []);
 
       function handleSignIn() {
@@ -2473,16 +2455,15 @@ function App({ dayData, setDayData, onSignOut }) {
           client_id: GOOGLE_CLIENT_ID,
           scope: "email profile",
           callback: async (resp) => {
-            if (resp.error) { alert("Sign in error: " + resp.error); return; }
+            if (resp.error) return;
             const cred = firebase.auth.GoogleAuthProvider.credential(null, resp.access_token);
-            auth.signInWithCredential(cred).catch(err => alert("Firebase error: " + err.message));
+            await auth.signInWithCredential(cred);
           },
         });
         client.requestAccessToken();
       }
 
       function handleSignOut() {
-        if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
         if (!IS_SANDBOX) auth.signOut();
         setUser(null);
         setDayDataState(null);
