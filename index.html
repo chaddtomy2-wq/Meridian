@@ -36,7 +36,7 @@
     const SCHEMA_VERSION = 1;
 
     // ─── CONFIG ─────────────────────────────────────────────────────────────────
-    const GOOGLE_CLIENT_ID = "614878832014-01vorik4kp4k7kbagvqtnvpv06r8rtn0.apps.googleusercontent.com";
+    const GOOGLE_CLIENT_ID = "723669098116-dad1piko79i9fr3eddcgb60q28dmro0t.apps.googleusercontent.com";
     const firebaseConfig = {
       apiKey:            "AIzaSyDccQp1ZD4J9ahGekHL9zFUE444dA8eoco",
       authDomain:        "meridian-90661.firebaseapp.com",
@@ -2325,7 +2325,7 @@ function NavBar({ active, setTab }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // APP ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
-export default function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
+function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
   const [tab, setTab]       = useState(0);
   const [_dayData, _setDayData] = useState(buildInitialDayData);
   const dayData    = propDayData    || _dayData;
@@ -2385,7 +2385,7 @@ export default function App({ dayData: propDayData, setDayData: propSetDayData }
     <TabChain   dayData={dayData} stars={stars} />,
     <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
     <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
-    <TabProfile dayData={dayData} setDayData={setDayData} />,
+    <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />,
   ];
 
   return (
@@ -2437,17 +2437,36 @@ export default function App({ dayData: propDayData, setDayData: propSetDayData }
           setUser({ uid:"local", name:"Chadd" });
           return;
         }
-        const unsub = auth.onAuthStateChanged(u => {
-          setLoading(false);
-          if (u) {
-            uidRef.current = u.uid;
-            setUser(u);
-            loadAllDays(u.uid, data => setDayDataState(data));
-          } else {
-            setUser(null);
-          }
+        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
+          const unsub = auth.onAuthStateChanged(u => {
+            setLoading(false);
+            if (u) {
+              uidRef.current = u.uid;
+              setUser(u);
+              const colRef = db.collection("users").doc(u.uid).collection("dayData");
+              if (unsubRef.current) unsubRef.current();
+              unsubRef.current = colRef.onSnapshot(snap => {
+                if (snap.empty) {
+                  const seedData = buildInitialDayData();
+                  const batch = db.batch();
+                  Object.entries(seedData).forEach(([date, data]) => {
+                    batch.set(colRef.doc(date), data);
+                  });
+                  batch.commit();
+                  setDayDataState(seedData);
+                } else {
+                  const data = {};
+                  snap.forEach(doc => { data[doc.id] = doc.data(); });
+                  setDayDataState(data);
+                }
+              }, err => console.error("Firestore error:", err));
+            } else {
+              setUser(null);
+              setDayDataState(null);
+              if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
+            }
+          });
         });
-        return unsub;
       }, []);
 
       function handleSignIn() {
