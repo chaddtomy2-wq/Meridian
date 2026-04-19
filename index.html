@@ -2367,12 +2367,12 @@ function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {
     touchStartX.current = null; touchStartY.current = null;
   }
 
-  const tabComponents = [
-    <TabChain   dayData={dayData} stars={stars} />,
-    <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
-    <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
-    <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />,
-  ];
+  function renderTab() {
+    if (tab === 0) return <TabChain   dayData={dayData} stars={stars} />;
+    if (tab === 1) return <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />;
+    if (tab === 2) return <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />;
+    if (tab === 3) return <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />;
+  }
 
   return (
     <div style={{ display:"flex", justifyContent:"center", minHeight:"100vh", background:"#000" }}>
@@ -2384,7 +2384,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {
       >
         {tab !== 0 && <StarField stars={stars} />}
         <div style={{ flex:1, display:"flex", flexDirection:"column", position:"relative", zIndex:1, overflow:"hidden" }}>
-          {tabComponents[tab]}
+          {renderTab()}
         </div>
         <NavBar active={tab} setTab={setTab} />
       </div>
