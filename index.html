@@ -76,9 +76,19 @@
         callback({ ...buildInitialDayData(), ...stored });
       } else {
         db.collection("users").doc(uid).collection("dayData").get().then(snap => {
-          const data = buildInitialDayData();
-          snap.forEach(doc => { data[doc.id] = doc.data(); });
-          callback(data);
+          if (snap.empty) {
+            // First sign-in — seed historical data to Firestore
+            const seedData = buildInitialDayData();
+            const batch = db.batch();
+            Object.entries(seedData).forEach(([date, data]) => {
+              batch.set(db.collection("users").doc(uid).collection("dayData").doc(date), data);
+            });
+            batch.commit().then(() => callback(seedData));
+          } else {
+            const data = {};
+            snap.forEach(doc => { data[doc.id] = doc.data(); });
+            callback(data);
+          }
         });
       }
     }
@@ -2391,16 +2401,16 @@ function App({ dayData, setDayData, onSignOut }) {
 
     // ─── AUTH WRAPPER ───────────────────────────────────────────────────────────
     function AuthGate() {
-      const [user, setUser]     = useState(null);
-      const [loading, setLoading] = useState(!IS_SANDBOX);
+      const [user, setUser]         = useState(null);
+      const [loading, setLoading]   = useState(!IS_SANDBOX);
       const [dayData, setDayDataState] = useState(null);
-      const uidRef = useRef(null);
+      const uidRef    = useRef(null);
+      const unsubRef  = useRef(null);
 
-      // Wrap setDayData to also persist to storage
+      // setDayData — writes to Firestore (prod) or localStorage (sandbox)
       function setDayData(updater) {
         setDayDataState(prev => {
           const next = typeof updater === "function" ? updater(prev) : updater;
-          // Persist changed days
           if (uidRef.current) {
             Object.keys(next).forEach(date => {
               if (!prev || JSON.stringify(prev[date]) !== JSON.stringify(next[date])) {
@@ -2415,21 +2425,47 @@ function App({ dayData, setDayData, onSignOut }) {
       useEffect(() => {
         if (IS_SANDBOX) {
           uidRef.current = "local";
-          loadAllDays("local", data => setDayDataState(data));
+          const stored = JSON.parse(localStorage.getItem("meridian_daydata") || "{}");
+          setDayDataState({ ...buildInitialDayData(), ...stored });
           setUser({ uid:"local", name:"Chadd" });
           return;
         }
-        const unsub = auth.onAuthStateChanged(u => {
-          setLoading(false);
-          if (u) {
-            uidRef.current = u.uid;
-            setUser(u);
-            loadAllDays(u.uid, data => setDayDataState(data));
-          } else {
-            setUser(null);
-          }
+
+        // Set auth persistence so user stays signed in across sessions
+        auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
+          const unsub = auth.onAuthStateChanged(u => {
+            setLoading(false);
+            if (u) {
+              uidRef.current = u.uid;
+              setUser(u);
+
+              // Use onSnapshot for real-time data sync
+              const colRef = db.collection("users").doc(u.uid).collection("dayData");
+              if (unsubRef.current) unsubRef.current();
+              unsubRef.current = colRef.onSnapshot(snap => {
+                if (snap.empty) {
+                  // First sign-in — seed historical data
+                  const seedData = buildInitialDayData();
+                  const batch = db.batch();
+                  Object.entries(seedData).forEach(([date, data]) => {
+                    batch.set(colRef.doc(date), data);
+                  });
+                  batch.commit();
+                  setDayDataState(seedData);
+                } else {
+                  const data = {};
+                  snap.forEach(doc => { data[doc.id] = doc.data(); });
+                  setDayDataState(data);
+                }
+              }, err => console.error("Firestore error:", err));
+            } else {
+              setUser(null);
+              setDayDataState(null);
+              if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
+            }
+          });
+          return unsub;
         });
-        return unsub;
       }, []);
 
       function handleSignIn() {
@@ -2446,6 +2482,7 @@ function App({ dayData, setDayData, onSignOut }) {
       }
 
       function handleSignOut() {
+        if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
         if (!IS_SANDBOX) auth.signOut();
         setUser(null);
         setDayDataState(null);
