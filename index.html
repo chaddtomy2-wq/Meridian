@@ -4,25 +4,38 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Meridian</title>
+
+  <!-- Firebase (compat/UMD) -->
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+  <!-- React 18 + Babel -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <style>* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #000; overflow: hidden; }</style>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #000; overflow: hidden; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
+
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback } = React;
 
-    const APP_NAME    = "Meridian";
-    const APP_VERSION = "V6";
-    const BUILD_DATE  = "2026-04-18";
+    // ─── VERSION ────────────────────────────────────────────────────────────────
+    const APP_NAME       = "Meridian";
+    const APP_VERSION    = "V1";
+    const BUILD_DATE     = "2026-04-18";
     const SCHEMA_VERSION = 1;
 
+    // ─── CONFIG ─────────────────────────────────────────────────────────────────
     const GOOGLE_CLIENT_ID = "723669098116-dad1piko79i9fr3eddcgb60q28dmro0t.apps.googleusercontent.com";
     const firebaseConfig = {
       apiKey:            "AIzaSyDccQp1ZD4J9ahGekHL9zFUE444dA8eoco",
@@ -33,9 +46,11 @@
       appId:             "1:56580302145:web:5962170aa67ae059aaedc0"
     };
 
+    // ─── ENVIRONMENT ────────────────────────────────────────────────────────────
     const IS_SANDBOX = !window.location.hostname.includes("github.io") &&
                        !window.location.hostname.includes("meridian-90661");
 
+    // ─── FIREBASE (production only) ──────────────────────────────────────────────
     let db = null, auth = null;
     if (!IS_SANDBOX) {
       firebase.initializeApp(firebaseConfig);
@@ -43,6 +58,7 @@
       auth = firebase.auth();
     }
 
+    // ─── STORAGE HELPERS ────────────────────────────────────────────────────────
     function saveDay(uid, date, data) {
       if (IS_SANDBOX) {
         const all = JSON.parse(localStorage.getItem("meridian_daydata") || "{}");
@@ -1881,7 +1897,7 @@ function MoodChart({ moodEntries }) {
   );
 }
 
-function TabProfile({ dayData, setDayData }) {
+function TabProfile({ dayData, setDayData, onSignOut }) {
   const [dayBoundary, setDayBoundary] = useState(4);
   const [lastBackup] = useState(null);
   const [backfillDay, setBackfillDay] = useState(null);
@@ -2295,7 +2311,7 @@ function NavBar({ active, setTab }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // APP ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
-function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
+function App({ dayData: propDayData, setDayData: propSetDayData, onSignOut } = {}) {
   const [tab, setTab]       = useState(0);
   const [_dayData, _setDayData] = useState(buildInitialDayData);
   const dayData    = propDayData    || _dayData;
@@ -2351,12 +2367,12 @@ function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
     touchStartX.current = null; touchStartY.current = null;
   }
 
-  function renderTab() {
-    if (tab === 0) return <TabChain   dayData={dayData} stars={stars} />;
-    if (tab === 1) return <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />;
-    if (tab === 2) return <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />;
-    return <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />;
-  }
+  const tabComponents = [
+    <TabChain   dayData={dayData} stars={stars} />,
+    <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
+    <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
+    <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />,
+  ];
 
   return (
     <div style={{ display:"flex", justifyContent:"center", minHeight:"100vh", background:"#000" }}>
@@ -2368,7 +2384,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
       >
         {tab !== 0 && <StarField stars={stars} />}
         <div style={{ flex:1, display:"flex", flexDirection:"column", position:"relative", zIndex:1, overflow:"hidden" }}>
-          {renderTab()}
+          {tabComponents[tab]}
         </div>
         <NavBar active={tab} setTab={setTab} />
       </div>
@@ -2377,6 +2393,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
 }
 
 
+    // ─── AUTH WRAPPER ────────────────────────────────────────────────────────────
     function AuthGate() {
       const [user, setUser]            = useState(null);
       const [loading, setLoading]      = useState(!IS_SANDBOX);
@@ -2460,18 +2477,20 @@ function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
       }
 
       if (loading) return (
-        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14, fontFamily:"sans-serif" }}>
           Loading…
         </div>
       );
 
       if (!user) return (
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", gap:24 }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", gap:24, fontFamily:"sans-serif" }}>
           <div style={{ fontFamily:"'Playfair Display',serif", fontSize:42, fontWeight:900, color:"#eeeeff" }}>Meridian</div>
           <div style={{ fontSize:13, color:"#9090b8" }}>Your daily operating system</div>
-          <button onClick={handleSignIn} style={{ marginTop:16, padding:"14px 32px", borderRadius:12, background:"rgba(240,168,48,0.12)", border:"1px solid rgba(240,168,48,0.4)", color:"#f0a830", fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"sans-serif" }}>
-            Sign in with Google
-          </button>
+          <button onClick={handleSignIn} style={{
+            marginTop:16, padding:"14px 32px", borderRadius:12,
+            background:"rgba(240,168,48,0.12)", border:"1px solid rgba(240,168,48,0.4)",
+            color:"#f0a830", fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"sans-serif",
+          }}>Sign in with Google</button>
           <div style={{ fontSize:10, color:"#5a5a80", marginTop:8 }}>
             {IS_SANDBOX ? "Sandbox Mode" : APP_NAME + " " + APP_VERSION + " · " + BUILD_DATE}
           </div>
@@ -2479,7 +2498,7 @@ function App({ dayData: propDayData, setDayData: propSetDayData } = {}) {
       );
 
       if (!dayData) return (
-        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14 }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14, fontFamily:"sans-serif" }}>
           Loading your data…
         </div>
       );
