@@ -1,0 +1,2488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Meridian</title>
+
+  <!-- Firebase (compat/UMD) -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+  <!-- React 18 + Babel -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #000; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ─── VERSION ────────────────────────────────────────────────────────────────
+    const APP_NAME    = "Meridian";
+    const APP_VERSION = "V1";
+    const BUILD_DATE  = "2026-04-18";
+    const SCHEMA_VERSION = 1;
+
+    // ─── CONFIG ─────────────────────────────────────────────────────────────────
+    const GOOGLE_CLIENT_ID = "614878832014-01vorik4kp4k7kbagvqtnvpv06r8rtn0.apps.googleusercontent.com";
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDccQp1ZD4J9ahGekHL9zFUE444dA8eoco",
+      authDomain:        "meridian-90661.firebaseapp.com",
+      projectId:         "meridian-90661",
+      storageBucket:     "meridian-90661.firebasestorage.app",
+      messagingSenderId: "56580302145",
+      appId:             "1:56580302145:web:5962170aa67ae059aaedc0"
+    };
+
+    // ─── ENVIRONMENT ────────────────────────────────────────────────────────────
+    const IS_SANDBOX = !window.location.hostname.includes("github.io") &&
+                       !window.location.hostname.includes("meridian-90661");
+
+    // ─── FIREBASE INIT (production only) ────────────────────────────────────────
+    let db = null, auth = null;
+    if (!IS_SANDBOX) {
+      firebase.initializeApp(firebaseConfig);
+      db   = firebase.firestore();
+      auth = firebase.auth();
+    }
+
+    // ─── STORAGE HELPERS ────────────────────────────────────────────────────────
+    // In sandbox: localStorage. In production: Firestore under users/{uid}/dayData/{date}
+    function saveDay(uid, date, data) {
+      if (IS_SANDBOX) {
+        const all = JSON.parse(localStorage.getItem("meridian_daydata") || "{}");
+        all[date] = data;
+        localStorage.setItem("meridian_daydata", JSON.stringify(all));
+      } else {
+        db.collection("users").doc(uid).collection("dayData").doc(date).set(data, { merge: true });
+      }
+    }
+
+    function loadAllDays(uid, callback) {
+      if (IS_SANDBOX) {
+        const stored = JSON.parse(localStorage.getItem("meridian_daydata") || "{}");
+        callback({ ...buildInitialDayData(), ...stored });
+      } else {
+        db.collection("users").doc(uid).collection("dayData").get().then(snap => {
+          const data = buildInitialDayData();
+          snap.forEach(doc => { data[doc.id] = doc.data(); });
+          callback(data);
+        });
+      }
+    }
+
+
+// ─── MERIDIAN ─────────────────────────────────────────────────────────────────
+// Visual: Playfair Display + DM Mono + glass cards + ambient orbs
+// Spec additions: 4am day boundary, partial completion dots, STT fallback,
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const MORNING_ROUTINE_DEFAULT = [
+  { id:"mr1", label:"Hygiene",         type:"check",   done:false },
+  { id:"mr2", label:"Move Your Body",  type:"check", done:false },
+  { id:"mr3", label:"Meditate",        type:"check", done:false },
+  { id:"mr4", label:"Weight",          type:"weight",  done:false, value:"" },
+];
+
+const NIGHT_ROUTINE_DEFAULT = [
+  { id:"nr2", label:"Brush Teeth",    type:"check",     done:false },
+  { id:"nr3", label:"Wash Face",      type:"check",     done:false },
+  { id:"nr4", label:"Stretch",        type:"check",     done:false },
+  { id:"nr5", label:"Pages Read",     type:"pages",     done:false, start:"", end:"" },
+];
+
+
+// ─── THEME ────────────────────────────────────────────────────────────────────
+const BG      = "#08081a";
+const SURFACE = "rgba(255,255,255,0.10)";
+const SURF2   = "rgba(255,255,255,0.16)";
+const BORDER  = "rgba(255,255,255,0.16)";
+const BORDER2 = "rgba(255,255,255,0.26)";
+const TEXT    = "#eeeeff";
+const TEXT2   = "#9090b8";
+const TEXT3   = "#5a5a80";
+const DAWN    = "#f0a830";
+const DUSK    = "#6ab0e0";
+const DANGER  = "#e05a4e";
+
+// ─── DATE UTILS ───────────────────────────────────────────────────────────────
+// 4am logical day boundary
+function getLogicalDate(dayBoundaryHour = 0) {
+  const now = new Date();
+  if (now.getHours() < dayBoundaryHour) {
+    now.setDate(now.getDate() - 1);
+  }
+  return now.toISOString().slice(0, 10);
+}
+
+function dateStr(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return d.toISOString().slice(0, 10);
+}
+
+function formatTimeLabel(mins) {
+  const h = Math.floor(mins / 60), m = mins % 60;
+  const ap = h >= 12 ? "PM" : "AM", h12 = h % 12 || 12;
+  return `${h12}${m ? `:${m.toString().padStart(2,"0")}` : ""} ${ap}`;
+}
+
+function formatMinsDur(mins) {
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins/60), m = mins%60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+
+
+function genId() { return `${Date.now()}_${Math.random().toString(36).slice(2,7)}`; }
+
+// ─── INITIAL STATE ────────────────────────────────────────────────────────────
+function buildInitialDayData() {
+  return {
+    "2026-02-07": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:3, anxiety:5 } },
+    "2026-02-08": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:2, anxiety:7 } },
+    "2026-02-09": { dawn:"none", dusk:"none", weight:178.0, mood:{ happiness:10, anxiety:3 } },
+    "2026-02-10": { dawn:"none", dusk:"none", weight:176.6, mood:{ happiness:10, anxiety:2 } },
+    "2026-02-11": { dawn:"none", dusk:"none", weight:177.0, mood:{ happiness:2, anxiety:2 } },
+    "2026-02-12": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-13": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-14": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-15": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-16": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:1 } },
+    "2026-02-17": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:1 } },
+    "2026-02-18": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-19": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 } },
+    "2026-02-20": { dawn:"none", dusk:"none", mood:{ happiness:5, anxiety:4 }, ride:{ distance_km:2.42, time:"5:55", speed_kmh:24.5 } },
+    "2026-02-21": { dawn:"none", dusk:"none", mood:{ happiness:8, anxiety:2 } },
+    "2026-02-22": { dawn:"none", dusk:"none", weight:178.6, mood:{ happiness:2, anxiety:2 } },
+    "2026-02-23": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:8, anxiety:2 } },
+    "2026-02-24": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:4, anxiety:4 } },
+    "2026-02-25": { dawn:"none", dusk:"none", weight:178.6, mood:{ happiness:4, anxiety:4 } },
+    "2026-02-26": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:7, anxiety:2 } },
+    "2026-02-27": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:4, anxiety:2 } },
+    "2026-02-28": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:4, anxiety:4 } },
+    "2026-03-01": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:7, anxiety:3 } },
+    "2026-03-02": { dawn:"none", dusk:"none", weight:179.2, mood:{ happiness:7, anxiety:5 }, ride:{ distance_km:15.2, time:"36:55", speed_kmh:24.7 } },
+    "2026-03-03": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-03-04": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:5, anxiety:3 }, ride:{ distance_km:18.4, time:"44:41", speed_kmh:24.7 } },
+    "2026-03-05": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-03-06": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-03-07": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-03-08": { dawn:"none", dusk:"none", weight:178.0, mood:{ happiness:8, anxiety:3 }, ride:{ distance_km:12.8, time:"31:13", speed_kmh:24.6 } },
+    "2026-03-09": { dawn:"none", dusk:"none", weight:177.0, mood:{ happiness:6, anxiety:3 } },
+    "2026-03-10": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:7, anxiety:3 }, ride:{ distance_km:14.2, time:"34:38", speed_kmh:24.6 } },
+    "2026-03-11": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:7, anxiety:3 } },
+    "2026-03-12": { dawn:"none", dusk:"none", weight:179.0, mood:{ happiness:3, anxiety:4 } },
+    "2026-03-13": { dawn:"none", dusk:"none", weight:177.0, mood:{ happiness:3, anxiety:4 } },
+    "2026-03-14": { dawn:"none", dusk:"none" },
+    "2026-03-15": { dawn:"none", dusk:"none" },
+    "2026-03-16": { dawn:"none", dusk:"none" },
+    "2026-03-17": { dawn:"none", dusk:"none", weight:177.0, ride:{ distance_km:16.33, time:"39:40", speed_kmh:24.7 } },
+    "2026-03-18": { dawn:"none", dusk:"none" },
+    "2026-03-19": { dawn:"none", dusk:"none", weight:177.0, ride:{ distance_km:11.5, time:"28:02", speed_kmh:24.6 } },
+    "2026-03-20": { dawn:"none", dusk:"none" },
+    "2026-03-21": { dawn:"none", dusk:"none", weight:177.0, ride:{ distance_km:7.5, time:"18:17", speed_kmh:24.6 } },
+    "2026-03-22": { dawn:"none", dusk:"none" },
+    "2026-03-23": { dawn:"none", dusk:"none" },
+    "2026-03-24": { dawn:"none", dusk:"none" },
+    "2026-03-25": { dawn:"none", dusk:"none" },
+    "2026-03-26": { dawn:"none", dusk:"none" },
+    "2026-03-27": { dawn:"none", dusk:"none", weight:174.0, mood:{ happiness:8, anxiety:3 } },
+    "2026-03-28": { dawn:"none", dusk:"none", weight:172.0, mood:{ happiness:8, anxiety:3 } },
+    "2026-03-29": { dawn:"none", dusk:"none", weight:176.0, mood:{ happiness:8, anxiety:2 }, ride:{ distance_km:5.0, time:"12:11", speed_kmh:24.6 } },
+    "2026-03-30": { dawn:"none", dusk:"none", weight:175.4, mood:{ happiness:8, anxiety:2 } },
+    "2026-03-31": { dawn:"none", dusk:"none", weight:176.0, mood:{ happiness:8, anxiety:2 } },
+    "2026-04-01": { dawn:"none", dusk:"none", weight:175.8, mood:{ happiness:7, anxiety:3 }, ride:{ distance_km:6.0, time:"14:38", speed_kmh:24.6 } },
+    "2026-04-02": { dawn:"none", dusk:"none", weight:176.0, mood:{ happiness:7, anxiety:3 } },
+    "2026-04-03": { dawn:"none", dusk:"none", weight:178.0, mood:{ happiness:5, anxiety:3 }, ride:{ distance_km:10.0, time:"24:23", speed_kmh:24.6 } },
+    "2026-04-04": { dawn:"none", dusk:"none", weight:178.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-04-05": { dawn:"none", dusk:"none", weight:178.0, mood:{ happiness:5, anxiety:3 } },
+    "2026-04-06": { dawn:"none", dusk:"none", weight:177.2, mood:{ happiness:6, anxiety:3 }, ride:{ distance_km:10.0, time:"24:23", speed_kmh:24.6 } },
+    "2026-04-07": { dawn:"none", dusk:"none", weight:177.6, mood:{ happiness:5, anxiety:4 } },
+    "2026-04-08": { dawn:"none", dusk:"none", weight:176.6, mood:{ happiness:3, anxiety:3 } },
+    "2026-04-09": { dawn:"none", dusk:"none", weight:176.6, mood:{ happiness:3, anxiety:3 }, ride:{ distance_km:16.33, time:"39:40", speed_kmh:24.7 } },
+    "2026-04-10": { dawn:"none", dusk:"none", weight:171.1, mood:{ happiness:3, anxiety:3 }, ride:{ distance_km:9.07, time:"22:07", speed_kmh:24.6 } },
+  };
+}
+
+// ─── GLOBAL STYLES ────────────────────────────────────────────────────────────
+const GlobalStyle = () => (
+  <style>{`
+    @keyframes aurora1 { 0%{transform:translateX(-10%) rotate(-3deg)} 50%{transform:translateX(10%) rotate(3deg)} 100%{transform:translateX(-10%) rotate(-3deg)} }
+    @keyframes aurora2 { 0%{transform:translateX(8%) rotate(2deg)} 50%{transform:translateX(-8%) rotate(-2deg)} 100%{transform:translateX(8%) rotate(2deg)} }
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html, body { height:100%; background:#000; }
+    body { color:${TEXT}; font-family:'DM Sans',sans-serif; overflow:hidden; }
+    ::-webkit-scrollbar { display:none; }
+    input, textarea, button, select { font-family:'DM Sans',sans-serif; }
+    button { cursor:pointer; }
+    textarea { resize:none; }
+
+    @keyframes fadeUp   { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes fadeIn   { from{opacity:0} to{opacity:1} }
+    @keyframes scaleIn  { from{opacity:0;transform:scale(0.94)} to{opacity:1;transform:scale(1)} }
+    @keyframes glow     { 0%,100%{opacity:0.6} 50%{opacity:1} }
+    @keyframes checkPop { 0%{transform:scale(0)} 60%{transform:scale(1.2)} 100%{transform:scale(1)} }
+    @keyframes slideUp  { from{transform:translateY(100%);opacity:0} to{transform:translateY(0);opacity:1} }
+    @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    .fu  { animation: fadeUp  0.42s cubic-bezier(.16,1,.3,1) both; }
+    .fu1 { animation: fadeUp  0.42s 0.05s cubic-bezier(.16,1,.3,1) both; }
+    .fu2 { animation: fadeUp  0.42s 0.10s cubic-bezier(.16,1,.3,1) both; }
+    .fu3 { animation: fadeUp  0.42s 0.15s cubic-bezier(.16,1,.3,1) both; }
+    .fu4 { animation: fadeUp  0.42s 0.20s cubic-bezier(.16,1,.3,1) both; }
+    .fi  { animation: fadeIn  0.3s ease both; }
+    .si  { animation: scaleIn 0.3s cubic-bezier(.16,1,.3,1) both; }
+
+    input[type=range] { -webkit-appearance:none; height:3px; border-radius:2px; outline:none; }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; cursor:pointer; }
+
+    .glass {
+      background: rgba(255,255,255,0.10);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 16px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+    }
+    .glass2 {
+      background: rgba(255,255,255,0.16);
+      border: 1px solid rgba(255,255,255,0.26);
+      border-radius: 14px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+    }
+    .pill {
+      padding: 4px 12px; border-radius: 100px;
+      font-size: 11px; font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+    .btn-ghost {
+      background:none; border:1px solid ${BORDER}; color:${TEXT2};
+      border-radius:10px; padding:10px 16px; font-size:12px;
+      letter-spacing:0.06em; transition:all 0.2s;
+    }
+    .btn-ghost:hover { border-color:${BORDER2}; color:${TEXT}; }
+  `}</style>
+);
+
+// ─── AMBIENT ORBS ─────────────────────────────────────────────────────────────
+const Orbs = ({ variant = "default" }) => {
+  const orbs = {
+    default: [
+      { w:320,h:320, color:"rgba(100,60,220,0.10)", top:-100, right:-80 },
+      { w:240,h:240, color:"rgba(59,100,200,0.07)",  bottom:140, left:-60 },
+      { w:180,h:180, color:"rgba(240,168,48,0.06)",  top:"42%", right:20 },
+    ],
+    dawn: [
+      { w:350,h:350, color:"rgba(240,168,48,0.10)",  top:-120, right:-60 },
+      { w:260,h:260, color:"rgba(220,100,40,0.06)",  bottom:100, left:-80 },
+      { w:200,h:200, color:"rgba(100,60,220,0.05)",  top:"50%", right:-40 },
+    ],
+    dusk: [
+      { w:320,h:320, color:"rgba(40,60,140,0.15)",   top:-80,  left:-80 },
+      { w:280,h:280, color:"rgba(106,176,224,0.08)", bottom:80, right:-60 },
+      { w:180,h:180, color:"rgba(80,40,160,0.08)",   top:"40%", left:20 },
+    ],
+    forge: [
+      { w:300,h:300, color:"rgba(180,120,20,0.09)",  top:-80, right:-60 },
+      { w:220,h:220, color:"rgba(224,90,78,0.06)",   bottom:120, left:-60 },
+    ],
+  };
+  const list = orbs[variant] || orbs.default;
+  return (
+    <div style={{ position:"absolute", inset:0, pointerEvents:"none", zIndex:0, overflow:"hidden" }}>
+      {list.map((o, i) => (
+        <div key={i} style={{
+          position:"absolute", borderRadius:"50%",
+          width:o.w, height:o.h,
+          background:`radial-gradient(circle,${o.color} 0%,transparent 70%)`,
+          top:o.top, bottom:o.bottom, left:o.left, right:o.right,
+          filter:"blur(50px)",
+        }} />
+      ))}
+    </div>
+  );
+};
+
+// ─── STAR FIELD ───────────────────────────────────────────────────────────────
+const StarField = ({ stars }) => (
+  <div style={{ position:"absolute", inset:0, pointerEvents:"none", zIndex:0 }}>
+    {stars.map((s,i) => (
+      <div key={i} style={{
+        position:"absolute", width:s.w, height:s.w, borderRadius:"50%",
+        background:"white", left:`${s.x}%`, top:`${s.y}%`, opacity:s.op,
+      }} />
+    ))}
+  </div>
+);
+
+// ─── TAB WRAPPER ──────────────────────────────────────────────────────────────
+function TabWrap({ children, style = {} }) {
+  return (
+    <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", paddingBottom:88, position:"relative", zIndex:1, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+// ─── SECTION LABEL ────────────────────────────────────────────────────────────
+const Lbl = ({ children, style = {} }) => (
+  <div style={{ fontSize:10, fontWeight:600, letterSpacing:"0.16em", textTransform:"uppercase", color:TEXT2, marginBottom:6, ...style }}>
+    {children}
+  </div>
+);
+
+// ─── PAGE HEADER ─────────────────────────────────────────────────────────────
+const PageHeader = ({ label, title, right, className="fu" }) => (
+  <div className={className} style={{ marginBottom:24 }}>
+    {label && <Lbl>{label}</Lbl>}
+    <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between" }}>
+      <div style={{ fontFamily:"'Playfair Display',serif", fontSize:36, fontWeight:900, lineHeight:1, letterSpacing:"-0.01em" }}>
+        {title}
+      </div>
+      {right}
+    </div>
+  </div>
+);
+
+// ─── DIVIDER ──────────────────────────────────────────────────────────────────
+const Divider = ({ mb = 24 }) => <div style={{ height:1, background:BORDER, marginBottom:mb }} />;
+
+// ─── CHECKBOX ─────────────────────────────────────────────────────────────────
+const Checkbox = ({ checked, onChange, color = DAWN, size = 22 }) => (
+  <div onClick={onChange} style={{
+    width:size, height:size, borderRadius:Math.round(size*0.32),
+    border:`1.5px solid ${checked ? color : TEXT3}`,
+    background: checked ? color : "none",
+    boxShadow: checked ? `0 0 10px ${color}40` : "none",
+    display:"flex", alignItems:"center", justifyContent:"center",
+    flexShrink:0, cursor:"pointer", transition:"all 0.2s",
+  }}>
+    {checked && (
+      <svg width="11" height="8" viewBox="0 0 11 8" fill="none" style={{ animation:"checkPop 0.2s ease" }}>
+        <path d="M1 4L4 7L10 1" stroke={BG} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    )}
+  </div>
+);
+
+// ─── MODAL ────────────────────────────────────────────────────────────────────
+function Modal({ title, onClose, children }) {
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:1000,
+      background:"rgba(0,0,0,0.7)", backdropFilter:"blur(6px)",
+      display:"flex", alignItems:"flex-end", justifyContent:"center",
+    }} onClick={onClose}>
+      <div className="si" onClick={e => e.stopPropagation()} style={{
+        width:390, maxHeight:"82vh", overflowY:"auto",
+        background:"#10102a", border:`1px solid ${BORDER2}`,
+        borderRadius:"20px 20px 0 0", padding:"20px 20px 40px",
+      }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20 }}>
+          <div style={{ fontFamily:"'Playfair Display',serif", fontSize:20, fontWeight:700 }}>{title}</div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:TEXT2, fontSize:20, lineHeight:1 }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─── SEGMENTED PROGRESS ───────────────────────────────────────────────────────
+const SegProgress = ({ items, color }) => (
+  <div>
+    <div style={{ display:"flex", gap:4, marginBottom:6 }}>
+      {items.map((item, i) => (
+        <div key={i} style={{
+          flex:1, height:3, borderRadius:10,
+          background: item.done ? color : TEXT3,
+          boxShadow: item.done ? `0 0 6px ${color}50` : "none",
+          transition:"all 0.3s",
+        }} />
+      ))}
+    </div>
+    <div style={{ fontSize:10, color:TEXT2 }}>
+      {items.filter(i => i.done).length} of {items.length} complete
+    </div>
+  </div>
+);
+
+// ─── SPEECH TO TEXT ───────────────────────────────────────────────────────────
+function useSpeechToText(onResult) {
+  const [listening, setListening] = useState(false);
+  const [available, setAvailable] = useState(false);
+  const recRef = useRef(null);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setAvailable(!!SpeechRecognition);
+  }, []);
+
+  const toggle = useCallback(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    if (listening) {
+      recRef.current?.stop();
+      setListening(false);
+      return;
+    }
+    const rec = new SpeechRecognition();
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.lang = "en-US";
+    rec.onresult = e => {
+      const transcript = Array.from(e.results).map(r => r[0].transcript).join(" ");
+      onResult(transcript);
+    };
+    rec.onerror = () => { setListening(false); };
+    rec.onend = () => { setListening(false); };
+    rec.start();
+    recRef.current = rec;
+    setListening(true);
+  }, [listening, onResult]);
+
+  return { listening, available, toggle };
+}
+
+// ─── JOURNAL BOX ─────────────────────────────────────────────────────────────
+function JournalBox({ value, onChange, placeholder = "Write here…", color = DAWN }) {
+  const appendText = useCallback(t => onChange(value + (value ? " " : "") + t), [value, onChange]);
+  const { listening, available, toggle } = useSpeechToText(appendText);
+
+  return (
+    <div style={{ position:"relative" }}>
+      <textarea
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        style={{
+          width:"100%", background:"rgba(255,255,255,0.03)",
+          border:`1px solid ${BORDER}`, borderRadius:12,
+          color:TEXT, fontSize:13, padding:"12px 44px 12px 14px",
+          lineHeight:1.6, outline:"none",
+        }}
+      />
+      {available && (
+        <button onClick={toggle} style={{
+          position:"absolute", right:10, top:10,
+          width:28, height:28, borderRadius:"50%",
+          background: listening ? `${color}30` : "none",
+          border:`1px solid ${listening ? color : BORDER}`,
+          color: listening ? color : TEXT2,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          fontSize:13, transition:"all 0.2s",
+          animation: listening ? "pulse 1.5s ease infinite" : "none",
+        }}>🎤</button>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TAB: THE CHAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+function TabChain({ dayData, stars }) {
+  const [particles, setParticles] = useState([]);
+  const [tick, setTick] = useState(0);
+  const pidRef = useRef(0);
+  const logicalToday = getLogicalDate(1);
+
+  // Streak = count of days THIS MONTH where both dawn and dusk are full
+  function calcStreak(data) {
+    const now = new Date();
+    const thisMonth = now.toISOString().slice(0,7);
+    return Object.keys(data).filter(k => k.startsWith(thisMonth) && data[k].dawn === "full" && data[k].dusk === "full").length;
+  }
+
+  const streak = calcStreak(dayData);
+
+  // Ring fill = days elapsed this month / days in month
+  const now = new Date();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const dayOfMonth = now.getDate();
+  const monthPct = dayOfMonth / daysInMonth;
+  const monthName = now.toLocaleDateString("en-US", { month:"long", year:"numeric" });
+
+  // Ring geometry
+  const R = 130, cx = 195, cy = 210;
+  const circ = 2 * Math.PI * R;
+  const offset = circ * (1 - monthPct);
+
+  // Ember particle system — tip of the arc
+  useEffect(() => {
+    const t = setInterval(() => {
+      setTick(x => x + 1);
+      setParticles(prev => {
+        const tipAngle = (-90 + monthPct * 360) * Math.PI / 180;
+        const aged = prev
+          .map(p => ({ ...p, y: p.y - p.vy, x: p.x + p.vx, life: p.life - 1, opacity: p.life / p.maxLife }))
+          .filter(p => p.life > 0);
+        if (Math.random() < 0.6) {
+          aged.push({
+            id: pidRef.current++,
+            x: cx + R * Math.cos(tipAngle) + (Math.random() - 0.5) * 10,
+            y: cy + R * Math.sin(tipAngle) + (Math.random() - 0.5) * 10,
+            vx: (Math.random() - 0.5) * 0.4,
+            vy: 0.4 + Math.random() * 0.7,
+            size: 0.8 + Math.random() * 1.8,
+            life: 8 + Math.floor(Math.random() * 8),
+            maxLife: 16,
+            opacity: 1,
+            color: Math.random() > 0.45 ? "#FFAA00" : "#FF5500",
+          });
+        }
+        return aged.slice(-30);
+      });
+    }, 40);
+    return () => clearInterval(t);
+  }, [monthPct]);
+
+  const glowPulse = 0.8 + 0.2 * Math.sin(tick * 0.12);
+
+  return (
+    <TabWrap>
+      {/* Deep heat ambient */}
+      <div style={{ position:"absolute", top:60, left:"50%", transform:"translateX(-50%)", width:320, height:320, borderRadius:"50%", background:`radial-gradient(circle, rgba(255,80,0,${0.07 * glowPulse}) 0%, transparent 65%)`, pointerEvents:"none", zIndex:0 }} />
+
+      <div style={{ position:"relative", zIndex:1, display:"flex", flexDirection:"column", alignItems:"center", paddingTop:40 }}>
+
+        <svg width={390} height={420} style={{ display:"block", overflow:"visible" }}>
+          <defs>
+            <linearGradient id="emberGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%"   stopColor="#3A0A00" />
+              <stop offset="20%"  stopColor="#8B1A00" />
+              <stop offset="45%"  stopColor="#CC3300" />
+              <stop offset="68%"  stopColor="#FF6600" />
+              <stop offset="85%"  stopColor="#FF9900" />
+              <stop offset="95%"  stopColor="#FFCC00" />
+              <stop offset="100%" stopColor="#FFFFFF" />
+            </linearGradient>
+          </defs>
+
+          {/* Charcoal base track */}
+          <circle cx={cx} cy={cy} r={R} fill="none" stroke="#1A0600" strokeWidth={22} />
+          <circle cx={cx} cy={cy} r={R} fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth={22} />
+
+          {/* Outer heat glow */}
+          <circle cx={cx} cy={cy} r={R} fill="none"
+            stroke="#FF4400" strokeWidth={42}
+            strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset}
+            transform={`rotate(-90 ${cx} ${cy})`}
+            opacity={0.055 * glowPulse}
+          />
+          {/* Mid glow */}
+          <circle cx={cx} cy={cy} r={R} fill="none"
+            stroke="#FF7700" strokeWidth={28}
+            strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset}
+            transform={`rotate(-90 ${cx} ${cy})`}
+            opacity={0.09 * glowPulse}
+          />
+
+          {/* Main ember arc */}
+          <circle cx={cx} cy={cy} r={R} fill="none"
+            stroke="url(#emberGrad)" strokeWidth={20}
+            strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset}
+            transform={`rotate(-90 ${cx} ${cy})`}
+            style={{ filter:`drop-shadow(0 0 8px rgba(255,100,0,${glowPulse})) drop-shadow(0 0 18px rgba(255,60,0,0.5))` }}
+          />
+
+          {/* Inner bright edge */}
+          <circle cx={cx} cy={cy} r={R - 9} fill="none"
+            stroke="#FFDD00" strokeWidth={0.8}
+            strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset}
+            transform={`rotate(-90 ${cx} ${cy})`}
+            opacity={0.5 * glowPulse}
+          />
+          {/* Outer spark edge */}
+          <circle cx={cx} cy={cy} r={R + 9} fill="none"
+            stroke="#FF3300" strokeWidth={0.8}
+            strokeLinecap="round"
+            strokeDasharray={circ} strokeDashoffset={offset}
+            transform={`rotate(-90 ${cx} ${cy})`}
+            opacity={0.28 * glowPulse}
+          />
+
+          {/* Ember particles */}
+          {particles.map(p => (
+            <circle key={p.id} cx={p.x} cy={p.y} r={p.size} fill={p.color} opacity={p.opacity}
+              style={{ filter:`drop-shadow(0 0 ${p.size * 2}px ${p.color})` }} />
+          ))}
+
+          {/* White-hot tip — layered depth */}
+
+
+          {/* Streak number */}
+          <text x={cx} y={cy - 12} textAnchor="middle" fontSize={100} fontWeight={900}
+            fill="rgba(255,255,255,0.95)" fontFamily="Georgia,serif" letterSpacing={-5}
+            style={{ filter:`drop-shadow(0 0 30px rgba(255,80,0,${glowPulse * 0.35}))` }}>
+            {streak}
+          </text>
+          <text x={cx} y={cy + 26} textAnchor="middle" fontSize={11}
+            fill={`rgba(255,150,50,${0.65 + 0.15 * glowPulse})`} letterSpacing={5} fontFamily="Georgia,serif">
+            DAYS
+          </text>
+          <text x={cx} y={cy + 48} textAnchor="middle" fontSize={12}
+            fill="rgba(255,255,255,0.35)" letterSpacing={2} fontFamily="Georgia,serif">
+            {monthName.toUpperCase()}
+          </text>
+
+          {/* Month progress label — subtle, bottom of ring */}
+          <text x={cx} y={cy + 170} textAnchor="middle" fontSize={11}
+            fill="rgba(255,255,255,0.3)" letterSpacing={1} fontFamily="Georgia,serif">
+            {dayOfMonth} of {daysInMonth} days
+          </text>
+        </svg>
+
+      </div>
+    </TabWrap>
+  );
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TAB: DAWN — Variant aesthetic (scroll-triggered sunrise)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Dawn-specific colour tokens
+const D_TEAL      = "#2dd4bf";
+const D_TEAL_DIM  = "rgba(45,212,191,0.12)";
+const D_GOLD      = "#f0a830";
+const D_CARD_BASE = "rgba(10,25,30,0.42)";
+const D_CARD_DONE = "rgba(20,45,40,0.60)";
+const D_TEXT      = "#f0fdfa";
+const D_TEXT2     = "rgba(204,251,241,0.55)";
+
+// Noise-texture SVG (tiny, inline, no network request)
+const NOISE_URL = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`;
+
+// Sunrise gradient — spans 350% of scroll height so colour shifts as user scrolls
+const SUNRISE_GRAD = `linear-gradient(180deg,
+  #020a14 0%,
+  #040e1f 8%,
+  #071828 18%,
+  #0b1e2e 28%,
+  #122338 38%,
+  #1c2645 48%,
+  #2a2248 58%,
+  #3d2040 68%,
+  #5c2a28 78%,
+  #8b4a0f 90%,
+  #c4780a 100%
+)`;
+
+function DawnCheckbox({ checked, onToggle }) {
+  return (
+    <div onClick={onToggle} style={{
+      width:22, height:22, borderRadius:"50%", flexShrink:0, cursor:"pointer",
+      border:`1.5px solid ${checked ? "transparent" : "rgba(45,212,191,0.35)"}`,
+      background: checked ? D_TEAL : "none",
+      boxShadow: checked ? "0 0 14px rgba(45,212,191,0.28)" : "none",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      transition:"all 0.3s cubic-bezier(0.34,1.56,0.64,1)",
+    }}>
+      {checked && (
+        <svg viewBox="0 0 24 24" fill="none" stroke="#020617" strokeWidth="3.5"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={{ width:12, height:12, animation:"checkPop 0.25s cubic-bezier(0.34,1.56,0.64,1) both" }}>
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      )}
+    </div>
+  );
+}
+
+function DawnJournalBox({ value, onChange, onSave, saved, placeholder = "Write here…" }) {
+  const appendText = useCallback(t => onChange(value + (value ? " " : "") + t), [value, onChange]);
+  const { listening, available, toggle } = useSpeechToText(appendText);
+  const hasContent = (value || "").trim().length > 0;
+  return (
+    <div style={{ position:"relative" }}>
+      <textarea
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={4}
+        style={{
+          width:"100%", background:"rgba(255,255,255,0.04)",
+          border:`1px solid ${saved ? "rgba(45,212,191,0.30)" : "rgba(45,212,191,0.14)"}`,
+          borderRadius:12,
+          color:D_TEXT, fontSize:13, padding:"12px 42px 12px 14px",
+          lineHeight:1.6, outline:"none",
+          transition:"border-color 0.2s",
+        }}
+      />
+      {/* Mic button */}
+      {available && (
+        <button onClick={toggle} style={{
+          position:"absolute", right:10, top:10,
+          width:26, height:26, borderRadius:"50%",
+          background: listening ? "rgba(45,212,191,0.15)" : "none",
+          border:`1px solid ${listening ? D_TEAL : "rgba(255,255,255,0.1)"}`,
+          color: listening ? D_TEAL : D_TEXT2,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          fontSize:12, transition:"all 0.2s",
+          animation: listening ? "pulse 1.5s ease infinite" : "none",
+        }}>🎤</button>
+      )}
+      {/* Save / saved row */}
+      {onSave && (
+        <div style={{ display:"flex", justifyContent:"flex-end", alignItems:"center", marginTop:8, gap:10 }}>
+          {saved && (
+            <span style={{ fontSize:11, color:"rgba(45,212,191,0.6)", letterSpacing:"0.04em" }}>
+              ✓ Saved
+            </span>
+          )}
+          <button
+            onClick={onSave}
+            disabled={!hasContent}
+            style={{
+              padding:"6px 18px", borderRadius:100, fontSize:12,
+              background: hasContent ? "rgba(45,212,191,0.12)" : "rgba(255,255,255,0.04)",
+              border:`1px solid ${hasContent ? "rgba(45,212,191,0.35)" : "rgba(255,255,255,0.08)"}`,
+              color: hasContent ? D_TEAL : "rgba(204,251,241,0.25)",
+              letterSpacing:"0.06em", transition:"all 0.2s",
+              cursor: hasContent ? "pointer" : "default",
+            }}>
+            {saved ? "Update" : "Save"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Aurora keyframes injected via a style element in TabDawn render
+function TabDawn({ dayData, setDayData, routine, setRoutine }) {
+  const [editMode, setEditMode]       = useState(false);
+  const [timerItem, setTimerItem]     = useState(null);
+  const [timerSecs, setTimerSecs]     = useState(0);
+  const [openPrompts, setOpenPrompts] = useState({});
+  const [longPressItem, setLongPressItem] = useState(null);
+  const [skyY, setSkyY]               = useState(0);   // scroll-driven sunrise
+  const timerRef  = useRef(null);
+  const lpRef     = useRef(null);
+  const scrollRef = useRef(null);
+
+  const logicalToday = getLogicalDate(1);
+  const completed = routine.filter(r => r.done).length;
+  const allDone   = completed === routine.length;
+
+  // ── Scroll handler — drives the sunrise gradient ─────────────────────────
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const pct = el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight);
+    // Ease-in curve: transition happens fast at the top, slows at the bottom
+    const eased = 1 - Math.pow(1 - Math.min(pct * 3, 1), 2);
+    setSkyY(eased * 66);
+  }, []);
+
+  // ── Routine helpers ───────────────────────────────────────────────────────
+  function toggleItem(id) {
+    setRoutine(r => r.map(item => item.id === id ? { ...item, done: !item.done } : item));
+  }
+  function updateJournal(id, value) {
+    setRoutine(r => r.map(item => item.id === id ? { ...item, value } : item));
+  }
+  function updatePrompt(itemId, promptId, value) {
+    setRoutine(r => r.map(item =>
+      item.id === itemId
+        ? { ...item, prompts: item.prompts.map(p => p.id === promptId ? { ...p, value } : p) }
+        : item
+    ));
+  }
+  function startTimer(item) { setTimerItem(item); setTimerSecs(item.duration * 60); }
+
+  // ── Timer tick ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (timerItem) {
+      timerRef.current = setInterval(() => {
+        setTimerSecs(s => {
+          if (s <= 1) {
+            clearInterval(timerRef.current);
+            toggleItem(timerItem.id);
+            setTimerItem(null);
+            return 0;
+          }
+          return s - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [timerItem]);
+
+  // ── Chain sync ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (allDone) {
+      setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), dawn:"full" } }));
+    } else if (completed > 0) {
+      setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), dawn:"partial" } }));
+    }
+  }, [allDone, completed]);
+
+  // ── Long-press to edit ────────────────────────────────────────────────────
+  function handleLPStart(id) { lpRef.current = setTimeout(() => setLongPressItem(id), 500); }
+  function handleLPEnd()      { clearTimeout(lpRef.current); }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FULL-SCREEN TIMER (unchanged behaviour, new colours)
+  // ─────────────────────────────────────────────────────────────────────────
+  if (timerItem) {
+    const mins = Math.floor(timerSecs / 60), secs = timerSecs % 60;
+    const pct  = timerSecs / (timerItem.duration * 60);
+    const circ = 2 * Math.PI * 56;
+    return (
+      <div style={{
+        flex:1, display:"flex", flexDirection:"column", alignItems:"center",
+        justifyContent:"center", position:"relative", overflow:"hidden",
+        background:"#020a14",
+      }}>
+        {/* Sunrise gradient behind timer */}
+        <div style={{ position:"absolute", inset:0, background:SUNRISE_GRAD, opacity:0.6 }} />
+        <div style={{ position:"absolute", inset:0, backgroundImage:NOISE_URL, opacity:0.05, pointerEvents:"none" }} />
+        {/* Two ambient blobs */}
+        <div style={{ position:"absolute", width:300, height:300, borderRadius:"50%", top:-80, right:-60,
+          background:"radial-gradient(circle,rgba(45,212,191,0.10) 0%,transparent 70%)", filter:"blur(60px)" }} />
+        <div style={{ position:"absolute", width:240, height:240, borderRadius:"50%", bottom:100, left:-60,
+          background:"radial-gradient(circle,rgba(240,168,48,0.10) 0%,transparent 70%)", filter:"blur(60px)" }} />
+
+        <div style={{ position:"relative", zIndex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:0 }}>
+          <div style={{ fontSize:10, fontWeight:600, letterSpacing:"0.22em", textTransform:"uppercase", color:D_TEXT2, marginBottom:32 }}>
+            {timerItem.label}
+          </div>
+          <div style={{ position:"relative", width:140, height:140 }}>
+            <svg width="140" height="140" style={{ transform:"rotate(-90deg)", position:"absolute", top:0, left:0 }}>
+              <circle cx="70" cy="70" r="56" fill="none" stroke="rgba(45,212,191,0.12)" strokeWidth="2"/>
+              <circle cx="70" cy="70" r="56" fill="none" stroke={D_TEAL} strokeWidth="2"
+                strokeDasharray={circ} strokeDashoffset={circ * (1 - pct)}
+                strokeLinecap="round"
+                style={{ transition:"stroke-dashoffset 1s linear", filter:`drop-shadow(0 0 8px ${D_TEAL})` }}
+              />
+            </svg>
+            <div style={{
+              position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center",
+              fontFamily:"'DM Mono',monospace", fontSize:36, fontWeight:500,
+              color:D_TEAL, letterSpacing:"-0.04em",
+            }}>
+              {String(mins).padStart(2,"0")}:{String(secs).padStart(2,"0")}
+            </div>
+          </div>
+          <button onClick={() => { clearInterval(timerRef.current); setTimerItem(null); }} style={{
+            marginTop:48, padding:"11px 36px", borderRadius:100,
+            background:"rgba(10,25,30,0.6)", backdropFilter:"blur(20px)",
+            border:"1px solid rgba(45,212,191,0.18)", color:D_TEXT2,
+            fontSize:12, letterSpacing:"0.1em",
+          }}>End Early</button>
+        </div>
+      </div>
+    );
+  }
+
+  // scroll-fraction for finish message (Variant behaviour)
+  const [showFinish, setShowFinish] = useState(false);
+
+  const handleScrollFull = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const frac = maxScroll > 0 ? el.scrollTop / maxScroll : 0;
+    // Accelerate: first 30% of scroll = 80% of the sunrise transition
+    const eased = 1 - Math.pow(1 - Math.min(frac * 3, 1), 2);
+    setSkyY(eased * 70);
+    setShowFinish(frac > 0.88);
+  }, []);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // LONG-PRESS EDIT MODAL — placed after all hooks to obey Rules of Hooks
+  // ─────────────────────────────────────────────────────────────────────────
+  if (longPressItem) {
+    const item = routine.find(r => r.id === longPressItem);
+    if (!item) return null;
+    return (
+      <Modal title="Edit Item" onClose={() => setLongPressItem(null)}>
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div>
+            <Lbl>Name</Lbl>
+            <input value={item.label}
+              onChange={e => setRoutine(r => r.map(i => i.id === longPressItem ? { ...i, label:e.target.value } : i))}
+              style={{ width:"100%", background:SURF2, border:`1px solid ${BORDER}`, borderRadius:10, padding:"10px 14px", color:TEXT, fontSize:14, outline:"none" }}
+            />
+          </div>
+          {item.type === "timer" && (
+            <div>
+              <Lbl>Duration (minutes)</Lbl>
+              <input type="number" value={item.duration}
+                onChange={e => setRoutine(r => r.map(i => i.id === longPressItem ? { ...i, duration:+e.target.value } : i))}
+                style={{ width:"100%", background:SURF2, border:`1px solid ${BORDER}`, borderRadius:10, padding:"10px 14px", color:TEXT, fontSize:14, outline:"none" }}
+              />
+            </div>
+          )}
+          <button onClick={() => { setRoutine(r => r.filter(i => i.id !== longPressItem)); setLongPressItem(null); }} style={{
+            padding:"11px", borderRadius:10, background:"rgba(224,90,78,0.1)",
+            border:"1px solid rgba(224,90,78,0.3)", color:DANGER, fontSize:13,
+          }}>Remove Item</button>
+          <button onClick={() => setLongPressItem(null)} style={{
+            padding:"11px", borderRadius:10, background:`${D_TEAL}20`,
+            border:`1px solid ${D_TEAL}40`, color:D_TEAL, fontSize:13,
+          }}>Done</button>
+        </div>
+      </Modal>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MAIN RENDER
+  // ─────────────────────────────────────────────────────────────────────────
+  const today = new Date();
+  const dateLabel = today.toLocaleDateString("en-US", { weekday:"long", month:"short", day:"numeric" });
+
+  // Sub-label map for Variant-style card sublabels
+  const SUBLABELS = {
+    check:     "",
+    timer:     "",
+    weight:    "Log your weight",
+    journal:   "Morning pages",
+    prompts:   "Tap to expand",
+    ride:      "Photo → auto-extract",
+  };
+
+  return (
+    <div style={{ flex:1, display:"flex", flexDirection:"column", position:"relative", overflow:"hidden" }}>
+
+      {/* ── Aurora sunrise background ── */}
+      <div style={{
+        position:"absolute", inset:0, zIndex:0,
+        background:`linear-gradient(180deg,#030d1a 0%,#051428 10%,#071828 20%,#0a1f3d 30%,#122338 40%,#2a1f3d 52%,#4a2228 62%,#7a3a0f 74%,#c4780a 86%,#e8a020 94%,#f5c040 100%)`,
+        backgroundSize:"100% 350%",
+        backgroundPosition:`0 ${skyY}%`,
+        transition:"background-position 0.25s ease",
+      }} />
+
+      {/* ── Aurora blobs — fade out as sun rises ── */}
+      <div style={{
+        position:"absolute", top:-60, left:-40, width:320, height:220,
+        background:"linear-gradient(135deg, rgba(0,255,150,0.10), rgba(0,180,255,0.07), transparent)",
+        borderRadius:"60%", filter:"blur(44px)",
+        animation:"aurora1 8s ease infinite",
+        pointerEvents:"none", zIndex:1,
+        opacity: Math.max(0, 1 - skyY / 20),
+      }} />
+      <div style={{
+        position:"absolute", top:-20, right:-60, width:280, height:180,
+        background:"linear-gradient(135deg, rgba(120,0,255,0.09), rgba(0,200,255,0.05), transparent)",
+        borderRadius:"50%", filter:"blur(50px)",
+        animation:"aurora2 12s ease infinite",
+        pointerEvents:"none", zIndex:1,
+        opacity: Math.max(0, 1 - skyY / 40),
+      }} />
+
+      {/* ── Warm sunrise glow — blooms in as you scroll ── */}
+      <div style={{
+        position:"absolute", bottom:-40, left:"50%", transform:"translateX(-50%)",
+        width:300, height:200, borderRadius:"50%",
+        background:"radial-gradient(circle, rgba(240,160,40,0.18) 0%, transparent 70%)",
+        filter:"blur(20px)",
+        pointerEvents:"none", zIndex:1,
+        opacity: Math.min(1, skyY / 15),
+      }} />
+
+      {/* ── Noise overlay ── */}
+      <div style={{
+        position:"absolute", inset:0, zIndex:1, pointerEvents:"none",
+        backgroundImage:NOISE_URL, opacity:0.04,
+      }} />
+
+      {/* ── Scrollable content ── */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScrollFull}
+        style={{
+          flex:1, overflowY:"auto", overflowX:"hidden",
+          position:"relative", zIndex:2,
+          padding:"60px 24px 120px",
+          scrollbarWidth:"none", msOverflowStyle:"none",
+        }}
+      >
+        {/* ── Header ── */}
+        <header style={{ marginBottom:40 }}>
+          {/* Aurora header */}
+          <div className="fu" style={{
+            fontSize:10, letterSpacing:"0.25em", color:"rgba(150,220,255,0.5)",
+            marginBottom:4, textTransform:"uppercase",
+          }}>{dateLabel}</div>
+
+          <div className="fu1" style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4 }}>
+            <div style={{
+              fontSize:38, fontWeight:700, color:"#f0f8ff", lineHeight:1.1,
+            }}>Good morning</div>
+            <button onClick={() => setEditMode(!editMode)} style={{
+              padding:"5px 14px", borderRadius:100, flexShrink:0,
+              background: editMode ? "rgba(0,230,180,0.15)" : "rgba(255,255,255,0.05)",
+              border:`1px solid ${editMode ? "rgba(0,230,180,0.35)" : "rgba(255,255,255,0.1)"}`,
+              color: editMode ? "rgba(0,230,180,0.9)" : "rgba(150,220,255,0.4)",
+              fontSize:11, letterSpacing:"0.08em", transition:"all 0.2s",
+            }}>{editMode ? "Done" : "Edit"}</button>
+          </div>
+
+          {/* Segmented progress */}
+          <div className="fu2" style={{ marginTop:20 }}>
+            <div style={{ display:"flex", gap:4, marginBottom:5 }}>
+              {routine.map(item => (
+                <div key={item.id} style={{
+                  flex:1, height:2, borderRadius:10,
+                  background: item.done ? "#5eead4" : "rgba(255,255,255,0.08)",
+                  boxShadow: item.done ? "0 0 6px rgba(45,212,191,0.4)" : "none",
+                  transition:"all 0.35s ease",
+                }} />
+              ))}
+            </div>
+            <div style={{ fontSize:12, color:"rgba(204,251,241,0.6)" }}>
+              {completed} of {routine.length} complete
+            </div>
+          </div>
+        </header>
+
+        {/* ── Routine items — Variant card layout ── */}
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          {routine.map((item) => (
+            <DawnCard
+              key={item.id}
+              item={item}
+              sublabelMap={SUBLABELS}
+              openPrompts={openPrompts}
+              setOpenPrompts={setOpenPrompts}
+              onToggle={() => toggleItem(item.id)}
+              onTimerStart={() => startTimer(item)}
+              onWeightChange={val => {
+                setRoutine(r => r.map(i => i.id === item.id ? { ...i, value:val, done:!!val } : i));
+                if (val) setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), weight: parseFloat(val) } }));
+              }}
+              onJournalChange={v => updateJournal(item.id, v)}
+              onJournalSave={() => setRoutine(r => r.map(i => i.id === item.id ? { ...i, saved:true, done:true } : i))}
+              onPromptChange={(pid, v) => updatePrompt(item.id, pid, v)}
+              onLPStart={() => handleLPStart(item.id)}
+              onLPEnd={handleLPEnd}
+              onEditItem={() => setLongPressItem(item.id)}
+
+            />
+          ))}
+
+          {/* Add item (edit mode) */}
+          {editMode && (
+            <button
+              onClick={() => setRoutine(r => [...r, { id:genId(), label:"New Item", type:"check", done:false }])}
+              style={{
+                width:"100%", padding:"18px 20px", borderRadius:16,
+                background:"rgba(10,25,30,0.4)", backdropFilter:"blur(24px)",
+                border:"1px dashed rgba(45,212,191,0.20)",
+                color:"rgba(204,251,241,0.35)", fontSize:14,
+              }}>
+              + Add Item
+            </button>
+          )}
+
+          {/* Scroll spacer + finish message — Variant spec */}
+          <div style={{
+            height:100, display:"flex", alignItems:"center", justifyContent:"center", marginTop:40,
+          }}>
+            <div style={{
+              opacity: showFinish || allDone ? 1 : 0,
+              transform: showFinish || allDone ? "translateY(0)" : "translateY(20px)",
+              transition:"opacity 0.5s ease, transform 0.5s ease",
+              textAlign:"center", color:"#99f6e4",
+              fontSize:14, letterSpacing:"1.5px", textTransform:"uppercase",
+            }}>
+              The day is yours.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── DawnCard — Variant card component (label + sublabel + duration badge + press scale) ──
+function DawnCard({ item, sublabelMap, openPrompts, setOpenPrompts, onToggle, onTimerStart, onWeightChange, onJournalChange, onJournalSave, onPromptChange, onLPStart, onLPEnd, onEditItem }) {
+  const [pressed, setPressed] = useState(false);
+
+  const sublabel = typeof sublabelMap[item.type] === "function"
+    ? sublabelMap[item.type](item)
+    : sublabelMap[item.type];
+
+  const hasExpandable = item.type === "journal" || item.type === "weight" || item.type === "prompts";
+
+  return (
+    <div
+      onTouchStart={() => setPressed(true)}
+      onTouchEnd={() => setPressed(false)}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      onMouseLeave={() => setPressed(false)}
+      onClick={undefined}
+      style={{
+        position:"relative",
+        background: item.done ? "rgba(20,45,55,0.6)" : "rgba(10,25,30,0.4)",
+        backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)",
+        border:`1px solid ${item.done ? "rgba(150,255,220,0.20)" : "rgba(255,255,255,0.10)"}`,
+        borderRadius:16, padding:"18px 20px",
+        display:"flex", flexDirection:"column",
+        transition:"all 0.3s cubic-bezier(0.25,0.8,0.25,1)",
+        transform: pressed ? "scale(0.98)" : "scale(1)",
+        cursor: hasExpandable ? "default" : "pointer",
+        overflow:"hidden",
+      }}
+    >
+      {/* Main row — checkbox + text group + right element */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", zIndex:2 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:16 }}>
+          <div
+            onTouchStart={e => { e.stopPropagation(); e.preventDefault(); onLPStart(); }}
+            onTouchEnd={e => { e.stopPropagation(); e.preventDefault(); onLPEnd(); onToggle(); }}
+            onMouseDown={e => { e.stopPropagation(); onLPStart(); }}
+            onMouseUp={e => { e.stopPropagation(); onLPEnd(); onToggle(); }}
+            onMouseLeave={e => { onLPEnd(); }}
+            style={{ cursor:"pointer" }}
+          >
+            <DawnCheckbox checked={item.done} onToggle={() => {}} />
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <div style={{
+                fontSize:15, fontWeight:500,
+                color: item.done ? "rgba(240,253,250,0.38)" : "#f0fdfa",
+                textDecoration: item.done ? "line-through" : "none",
+                textDecorationColor:"rgba(94,234,212,0.3)",
+                transition:"opacity 0.3s",
+              }}>{item.label}</div>
+              <button
+                onClick={e => { e.stopPropagation(); onEditItem && onEditItem(); }}
+                onMouseDown={e => { e.stopPropagation(); onLPEnd && onLPEnd(); }}
+                onTouchStart={e => { e.stopPropagation(); onLPEnd && onLPEnd(); }}
+                style={{
+                  padding:"2px 6px", borderRadius:6, flexShrink:0,
+                  background:"none", border:"1px solid rgba(255,255,255,0.08)",
+                  color:"rgba(204,251,241,0.3)", fontSize:10,
+                  lineHeight:1, transition:"all 0.2s",
+                }}>✎</button>
+            </div>
+            {sublabel && (
+              <div style={{
+                fontSize:12, color:"rgba(204,251,241,0.6)", fontWeight:400,
+                ...(item.done ? { opacity:0.4, textDecoration:"line-through", textDecorationColor:"rgba(94,234,212,0.3)" } : {}),
+              }}>{sublabel}</div>
+            )}
+          </div>
+        </div>
+
+
+      </div>
+
+      {/* Expandable content below the row */}
+
+      {/* Weight */}
+      {item.type === "weight" && (
+        <div style={{ marginTop:14, display:"flex", alignItems:"center", gap:10 }}>
+          <input type="number" placeholder="lbs" value={item.value}
+            onClick={e => e.stopPropagation()}
+            onChange={e => onWeightChange(e.target.value)}
+            style={{
+              width:88, padding:"7px 12px",
+              background:"rgba(255,255,255,0.06)",
+              border:"1px solid rgba(45,212,191,0.20)", borderRadius:10,
+              color:"#f0fdfa", fontSize:14, outline:"none",
+            }}
+          />
+          <span style={{ fontSize:12, color:"rgba(204,251,241,0.6)" }}>lbs</span>
+        </div>
+      )}
+
+      {/* Journal */}
+      {item.type === "journal" && (
+        <div style={{ marginTop:14 }}>
+          <DawnJournalBox
+            value={item.value || ""}
+            onChange={onJournalChange}
+            onSave={onJournalSave}
+            saved={!!item.saved}
+          />
+        </div>
+      )}
+
+      {/* Prompts */}
+      {item.type === "prompts" && (
+        <div style={{ marginTop:14 }}>
+          {item.prompts.map(p => (
+            <div key={p.id} style={{ marginBottom:8 }}>
+              <div
+                onClick={e => { e.stopPropagation(); setOpenPrompts(o => ({ ...o, [p.id]: !o[p.id] })); }}
+                style={{ display:"flex", alignItems:"center", gap:8, padding:"5px 0", cursor:"pointer" }}>
+                <div style={{
+                  width:13, height:13, borderRadius:4, flexShrink:0,
+                  border:`1px solid ${openPrompts[p.id] ? D_TEAL : "rgba(255,255,255,0.12)"}`,
+                  background: openPrompts[p.id] ? "rgba(45,212,191,0.15)" : "none",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  transition:"all 0.2s",
+                }}>
+                  {openPrompts[p.id] && <div style={{ width:5, height:5, background:D_TEAL, borderRadius:2 }} />}
+                </div>
+                <span style={{ fontSize:12, fontWeight:500, color:"rgba(204,251,241,0.6)" }}>{p.label}</span>
+              </div>
+              {openPrompts[p.id] && (
+                <div style={{ marginTop:4 }}>
+                  <DawnJournalBox value={p.value || ""} onChange={v => onPromptChange(p.id, v)} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TAB: FORGE
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TAB: DUSK
+// ═══════════════════════════════════════════════════════════════════════════════
+function TabDusk({ dayData, setDayData, setTab, stars, routine, setRoutine }) {
+  const [editMode, setEditMode] = useState(false);
+  const [happy, setHappy]     = useState(7);
+  const [anxiety, setAnxiety] = useState(4);
+  const [openPrompts, setOpenPrompts] = useState({});
+  const [longPressItem, setLongPressItem] = useState(null);
+  const lpRef = useRef(null);
+
+  const logicalToday = getLogicalDate(1);
+  const completed = routine.filter(r => r.done).length;
+  const allDone = completed === routine.length;
+
+  function toggleItem(id) { setRoutine(r => r.map(item => item.id === id ? { ...item, done: !item.done } : item)); }
+  function updateJournal(id, value) { setRoutine(r => r.map(item => item.id === id ? { ...item, value } : item)); }
+  function updatePrompt(itemId, promptId, value) {
+    setRoutine(r => r.map(item =>
+      item.id === itemId
+        ? { ...item, prompts: item.prompts.map(p => p.id === promptId ? { ...p, value } : p) }
+        : item
+    ));
+  }
+
+  useEffect(() => {
+    // Always save mood whenever sliders change
+    setDayData(prev => ({
+      ...prev,
+      [logicalToday]: { ...(prev[logicalToday] || {}), mood:{ happiness:happy, anxiety } }
+    }));
+  }, [happy, anxiety]);
+
+  useEffect(() => {
+    if (allDone) {
+      setDayData(prev => ({
+        ...prev,
+        [logicalToday]: { ...(prev[logicalToday] || {}), dusk:"full",
+          pagesRead: (() => { const p = routine.find(i => i.type === "pages"); return p && p.start && p.end ? Math.max(0, parseInt(p.end) - parseInt(p.start)) : 0; })() }
+      }));
+    } else if (completed > 0) {
+      setDayData(prev => ({
+        ...prev,
+        [logicalToday]: { ...(prev[logicalToday] || {}), dusk:"partial" }
+      }));
+    }
+  }, [allDone, completed]);
+
+  function handleLongPressStart(id) { lpRef.current = setTimeout(() => setLongPressItem(id), 500); }
+  function handleLongPressEnd() { clearTimeout(lpRef.current); }
+
+  if (longPressItem) {
+    const item = routine.find(r => r.id === longPressItem);
+    if (!item) return null;
+    return (
+      <Modal title="Edit Item" onClose={() => setLongPressItem(null)}>
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div>
+            <Lbl>Name</Lbl>
+            <input value={item.label}
+              onChange={e => setRoutine(r => r.map(i => i.id === longPressItem ? { ...i, label:e.target.value } : i))}
+              style={{ width:"100%", background:SURF2, border:`1px solid ${BORDER}`, borderRadius:10, padding:"10px 14px", color:TEXT, fontSize:14, outline:"none" }}
+            />
+          </div>
+          <button onClick={() => { setRoutine(r => r.filter(i => i.id !== longPressItem)); setLongPressItem(null); }} style={{
+            padding:"11px", borderRadius:10, background:"rgba(224,90,78,0.1)",
+            border:"1px solid rgba(224,90,78,0.3)", color:DANGER, fontSize:13,
+          }}>Remove Item</button>
+          <button onClick={() => setLongPressItem(null)} style={{
+            padding:"11px", borderRadius:10, background:`${DUSK}20`,
+            border:`1px solid ${DUSK}40`, color:DUSK, fontSize:13,
+          }}>Done</button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <TabWrap>
+      <StarField stars={stars} />
+      <Orbs variant="dusk" />
+      <div style={{ padding:"28px 22px 0" }}>
+        <div className="fu" style={{ marginBottom:24 }}>
+                    <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:16 }}>
+            <div style={{ fontFamily:"'Playfair Display',serif", fontSize:36, fontWeight:900, lineHeight:1, letterSpacing:"-0.01em" }}>Dusk</div>
+            <button onClick={() => setEditMode(!editMode)} style={{
+              padding:"5px 14px", borderRadius:100, flexShrink:0,
+              background: editMode ? "rgba(106,176,224,0.15)" : "rgba(255,255,255,0.05)",
+              border:`1px solid ${editMode ? "rgba(106,176,224,0.35)" : "rgba(255,255,255,0.1)"}`,
+              color: editMode ? DUSK : "rgba(150,220,255,0.4)",
+              fontSize:11, letterSpacing:"0.08em", transition:"all 0.2s",
+            }}>{editMode ? "Done" : "Edit"}</button>
+          </div>
+          <SegProgress items={routine} color={DUSK} />
+          {allDone && (
+            <div className="fi" style={{
+              marginTop:12, padding:"10px 14px", borderRadius:12,
+              background:"rgba(106,176,224,0.08)", border:"1px solid rgba(106,176,224,0.2)",
+              fontSize:12, color:DUSK, letterSpacing:"0.04em",
+            }}>✓ Day complete. The chain holds.</div>
+          )}
+        </div>
+        <Divider />
+
+        {/* Routine items */}
+        <div className="fu1" style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:24 }}>
+          {routine.map(item => (
+            <div key={item.id}>
+              <div className="glass" style={{
+                padding:"14px 16px",
+                background: item.done ? "rgba(106,176,224,0.06)" : SURFACE,
+                borderColor: item.done ? "rgba(106,176,224,0.18)" : BORDER,
+                transition:"all 0.25s",
+              }}>
+                <div style={{ display:"flex", alignItems:"flex-start", gap:14 }}>
+                  <div style={{ marginTop:1 }}
+                    onTouchStart={e => { e.stopPropagation(); handleLongPressStart(item.id); }}
+                    onTouchEnd={e => { e.stopPropagation(); handleLongPressEnd(); }}
+                    onMouseDown={e => { e.stopPropagation(); handleLongPressStart(item.id); }}
+                    onMouseUp={e => { e.stopPropagation(); handleLongPressEnd(); }}
+                    onMouseLeave={() => handleLongPressEnd()}
+                  >
+                    <Checkbox checked={item.done} onChange={() => toggleItem(item.id)} color={DUSK} />
+                  </div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:14, fontWeight:500, color: item.done ? TEXT2 : TEXT, textDecoration: item.done ? "line-through" : "none" }}>
+                      {item.label}
+                    </div>
+
+
+
+                    {item.type === "pages" && (
+                      <div style={{ display:"flex", gap:8, marginTop:10, alignItems:"center" }}>
+                        <input type="number" placeholder="Start" value={item.start || ""}
+                          onChange={e => {
+                            const v = e.target.value;
+                            setRoutine(r => r.map(i => i.id === item.id ? { ...i, start:v, done: !!(v && i.end) } : i));
+                            if (v && item.end) {
+                              const pages = Math.max(0, parseInt(item.end) - parseInt(v));
+                              setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), pagesRead: pages } }));
+                            }
+                          }}
+                          style={{ width:72, padding:"8px 10px", background:SURF2, border:`1px solid ${BORDER}`, borderRadius:8, color:TEXT, fontSize:13, outline:"none" }}
+                        />
+                        <span style={{ fontSize:11, color:TEXT2 }}>→</span>
+                        <input type="number" placeholder="End" value={item.end || ""}
+                          onChange={e => {
+                            const v = e.target.value;
+                            setRoutine(r => r.map(i => i.id === item.id ? { ...i, end:v, done: !!(i.start && v) } : i));
+                            if (item.start && v) {
+                              const pages = Math.max(0, parseInt(v) - parseInt(item.start));
+                              setDayData(prev => ({ ...prev, [logicalToday]: { ...(prev[logicalToday] || {}), pagesRead: pages } }));
+                            }
+                          }}
+                          style={{ width:72, padding:"8px 10px", background:SURF2, border:`1px solid ${BORDER}`, borderRadius:8, color:TEXT, fontSize:13, outline:"none" }}
+                        />
+                        {item.start && item.end && (
+                          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:13, color:DUSK }}>
+                            +{Math.max(0, parseInt(item.end) - parseInt(item.start))} pages
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {item.type === "journal" && (
+                      <div style={{ marginTop:10 }}>
+                        <JournalBox value={item.value || ""} onChange={v => updateJournal(item.id, v)} placeholder="How did today go…" color={DUSK} />
+                      </div>
+                    )}
+
+                    {item.type === "prompts" && (
+                      <div style={{ marginTop:10 }}>
+                        {item.prompts.map(p => (
+                          <div key={p.id} style={{ marginBottom:8 }}>
+                            <div onClick={() => setOpenPrompts(o => ({ ...o, [p.id]: !o[p.id] }))}
+                              style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 0", cursor:"pointer" }}>
+                              <div style={{
+                                width:14, height:14, borderRadius:4, flexShrink:0,
+                                border:`1px solid ${openPrompts[p.id] ? DUSK : TEXT3}`,
+                                background: openPrompts[p.id] ? `${DUSK}20` : "none",
+                                display:"flex", alignItems:"center", justifyContent:"center",
+                                transition:"all 0.2s",
+                              }}>
+                                {openPrompts[p.id] && <div style={{ width:5, height:5, background:DUSK, borderRadius:2 }} />}
+                              </div>
+                              <span style={{ fontSize:12, fontWeight:500, color:TEXT2 }}>{p.label}</span>
+                            </div>
+                            {openPrompts[p.id] && (
+                              <div className="fi" style={{ marginTop:4 }}>
+                                <JournalBox value={p.value || ""} onChange={v => updatePrompt(item.id, p.id, v)} placeholder="Write here…" color={DUSK} />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {editMode && (
+            <button onClick={() => setRoutine(r => [...r, { id:genId(), label:"New Item", type:"check", done:false }])} style={{
+              width:"100%", padding:"13px", borderRadius:14, background:SURFACE,
+              border:`1px dashed ${TEXT3}`, color:TEXT2, fontSize:13,
+            }}>+ Add Item</button>
+          )}
+        </div>
+
+        {/* Mood check */}
+        <div className="fu2 glass" style={{ padding:"16px 18px", marginBottom:24 }}>
+          <Lbl>Mood Check</Lbl>
+          {[["Happiness", happy, setHappy, DAWN], ["Anxiety", anxiety, setAnxiety, DANGER]].map(([label, val, setter, color]) => (
+            <div key={label} style={{ marginBottom:14 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}>
+                <span style={{ fontSize:12, fontWeight:500, color:TEXT2 }}>{label}</span>
+                <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12, color }}>{val}</span>
+              </div>
+              <input type="range" min={1} max={10} value={val}
+                onChange={e => setter(+e.target.value)}
+                style={{ width:"100%", accentColor:color }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </TabWrap>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TAB: PROFILE
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHART HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+const DAY_W = 22;
+
+function buildDays(firstDate, totalDays, dataMap) {
+  const days = [];
+  for (let i = 0; i < totalDays; i++) {
+    const d = new Date(firstDate); d.setDate(d.getDate() + i);
+    const key = d.toISOString().slice(0, 10);
+    days.push({ i, key, dayNum: d.getDate(), month: d.getMonth(), year: d.getFullYear(), data: dataMap[key] || null });
+  }
+  return days;
+}
+
+function buildMonthBoundaries(days) {
+  const bounds = [];
+  days.forEach((day, i) => {
+    if (i === 0 || day.dayNum === 1) {
+      let endI = i;
+      while (endI + 1 < days.length && days[endI+1].month === day.month && days[endI+1].year === day.year) endI++;
+      bounds.push({
+        i,
+        lineX: DAY_W * i,
+        midX:  DAY_W * i + (DAY_W * (endI - i + 1)) / 2,
+        label: new Date(day.year, day.month, 1).toLocaleDateString("en-US", { month:"short", year:"2-digit" }),
+        yrMo:  `${day.year}-${String(day.month+1).padStart(2,"0")}`,
+      });
+    }
+  });
+  return bounds;
+}
+
+function ChartScrollDiv({ monthBounds, setVisMonth, initScrollDay, children, style }) {
+  const ref = React.useRef(null);
+  const inited = React.useRef(false);
+  const boundsRef = React.useRef(monthBounds);
+  boundsRef.current = monthBounds;
+
+  React.useLayoutEffect(() => {
+    if (ref.current && !inited.current) {
+      ref.current.scrollLeft = initScrollDay * DAY_W - ref.current.clientWidth / 2;
+      inited.current = true;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    function handleScroll() {
+      const mid = el.scrollLeft + el.clientWidth / 2;
+      const bounds = boundsRef.current;
+      if (!bounds.length) return;
+      const idx = Math.floor(mid / DAY_W);
+      let result = bounds[0].yrMo;
+      for (let i = bounds.length - 1; i >= 0; i--) {
+        if (idx >= Math.round(bounds[i].lineX / DAY_W)) {
+          result = bounds[i].yrMo;
+          break;
+        }
+      }
+      console.log("SCROLL mid:", mid, "idx:", idx, "result:", result, "bounds:", bounds.map(b => b.yrMo + "@" + b.lineX));
+    }
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  return (
+    <div ref={ref} data-chartscroll="1"
+      style={{ overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", flex:1, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+// ─── WEIGHT CHART ─────────────────────────────────────────────────────────────
+function WeightChart({ weightEntries, minW, maxW }) {
+
+  const scrollRef = useRef(null);
+
+  if (weightEntries.length <= 1) return (
+    <div className="fu1 glass" style={{ padding:"16px 18px", marginBottom:14 }}>
+      <Lbl>Weight</Lbl>
+      <div style={{ fontSize:12, color:TEXT3, fontStyle:"italic" }}>Log weight in Dawn to see your trend</div>
+    </div>
+  );
+
+  const CHART_H = 150, Y_W = 36, TOP = 30, BOT = 20;
+  const firstDate = new Date(weightEntries[0][0]);
+  const today = new Date();
+  const todayIdx  = Math.round((today - firstDate) / 86400000);
+  const totalDays = todayIdx + 1;
+
+  const weightMap = {};
+  weightEntries.forEach(([k, d]) => { weightMap[k] = d.weight; });
+
+  const wPad  = Math.max((maxW - minW) * 0.12, 1);
+  const yMin  = Math.floor(minW - wPad);
+  const yMax  = Math.ceil(maxW + wPad);
+  const yRange = yMax - yMin || 1;
+  const yStep = yRange <= 10 ? 1 : yRange <= 20 ? 2 : yRange <= 30 ? 3 : 5;
+  const yTicks = [];
+  for (let v = Math.ceil(yMin/yStep)*yStep; v <= yMax; v += yStep) yTicks.push(v);
+
+  function yPx(w) { return TOP + CHART_H - ((w - yMin) / yRange) * CHART_H; }
+  function xPx(i) { return i * DAY_W + DAY_W / 2; }
+
+  const days = buildDays(firstDate, totalDays, weightMap).map(d => ({ ...d, w: d.data }));
+  const monthBounds = buildMonthBoundaries(days);
+
+  // One continuous line through all logged days — skips gaps, connects nearest points
+  const loggedDays = days.filter(d => d.w);
+
+  const svgW = totalDays * DAY_W + 8;
+  const svgH = TOP + CHART_H + BOT;
+
+
+
+  return (
+    <div className="fu1 glass" style={{ padding:"14px 0 14px", marginBottom:14 }}>
+      <div style={{ padding:"0 16px 10px", display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+        <Lbl style={{ marginBottom:0 }}>Weight</Lbl>
+
+      </div>
+      <div style={{ display:"flex" }}>
+        <svg width={Y_W} height={svgH} style={{ flexShrink:0, display:"block" }}>
+          <line x1={Y_W-1} y1={TOP} x2={Y_W-1} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+          {yTicks.map(v => (
+            <g key={v}>
+              <text x={Y_W-6} y={yPx(v)+3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.65)" fontFamily="DM Mono,monospace">{v}</text>
+              <line x1={Y_W-3} y1={yPx(v)} x2={Y_W} y2={yPx(v)} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+            </g>
+          ))}
+        </svg>
+        <div
+          ref={el => { if (el && !scrollRef.current) { el.scrollLeft = todayIdx * DAY_W - el.clientWidth / 2; scrollRef.current = el; } }}
+          data-chartscroll="1"
+
+          style={{ overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", flex:1 }}
+        >
+          <svg width={svgW} height={svgH} style={{ display:"block", overflow:"visible" }}>
+            {yTicks.map(v => (
+              <line key={v} x1={0} y1={yPx(v)} x2={svgW} y2={yPx(v)} stroke="rgba(255,255,255,0.08)" strokeWidth={1}/>
+            ))}
+            <line x1={0} y1={TOP+CHART_H} x2={svgW} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+            {monthBounds.map((m, mi) => (
+              <g key={mi}>
+                {mi > 0 && <line x1={m.lineX} y1={TOP-18} x2={m.lineX} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.12)" strokeWidth={1} strokeDasharray="3 3"/>}
+                <text x={m.midX} y={TOP-7} textAnchor="middle" fontSize={10} fontWeight={600} fill="rgba(255,200,80,0.9)" fontFamily="DM Mono,monospace">{m.label}</text>
+              </g>
+            ))}
+            {days.map(day => (
+              <g key={day.key}>
+                <line x1={xPx(day.i)} y1={TOP+CHART_H} x2={xPx(day.i)} y2={TOP+CHART_H+4} stroke="rgba(255,255,255,0.15)" strokeWidth={1}/>
+                <text x={xPx(day.i)} y={TOP+CHART_H+13} textAnchor="middle" fontSize={7} fill="rgba(255,255,255,0.45)" fontFamily="DM Mono,monospace">{day.dayNum}</text>
+              </g>
+            ))}
+            {loggedDays.length > 1 && (
+              <polyline points={loggedDays.map(d => `${xPx(d.i)},${yPx(d.w)}`).join(" ")} fill="none" stroke={DAWN} strokeWidth={1.5} opacity={0.8}/>
+            )}
+            {loggedDays.length > 1 && (
+              <polygon points={`${xPx(loggedDays[0].i)},${TOP+CHART_H} ${loggedDays.map(d=>`${xPx(d.i)},${yPx(d.w)}`).join(" ")} ${xPx(loggedDays[loggedDays.length-1].i)},${TOP+CHART_H}`} fill={DAWN} opacity={0.06}/>
+            )}
+            {loggedDays.map(day => (
+              <circle key={day.key} cx={xPx(day.i)} cy={yPx(day.w)} r={2.5} fill={DAWN} opacity={0.9}/>
+            ))}
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CYCLING CHART ────────────────────────────────────────────────────────────
+function CyclingChart({ rideEntries }) {
+
+  const scrollRef = useRef(null);
+
+  if (!rideEntries.length) return (
+    <div className="fu2 glass" style={{ padding:"16px 18px", marginBottom:14 }}>
+      <Lbl>Cycling</Lbl>
+      <div style={{ fontSize:12, color:TEXT3, fontStyle:"italic" }}>Log a ride to see your trend</div>
+    </div>
+  );
+
+  const CHART_H = 130, Y_W = 36, TOP = 30, BOT = 20;
+  const FUTURE = 60;
+  const firstDate    = new Date(rideEntries[0][0]);
+  const lastRideDate = new Date(rideEntries[rideEntries.length-1][0]);
+  const today        = new Date();
+  const totalDays    = Math.round((today - firstDate) / 86400000) + 1 + FUTURE;
+  const todayIdx     = Math.round((today - firstDate) / 86400000);
+  const lastRideIdx  = Math.round((lastRideDate - firstDate) / 86400000);
+
+  const rideMap = {};
+  rideEntries.forEach(([k, d]) => { rideMap[k] = d.ride; });
+
+  const dists = rideEntries.map(([,d]) => d.ride.distance_km).filter(Boolean);
+  const minD = Math.max(0, Math.floor(Math.min(...dists) - 1));
+  const maxD = Math.ceil(Math.max(...dists) + 1);
+  const yRange = maxD - minD || 1;
+  const yStep = yRange <= 5 ? 1 : yRange <= 20 ? 2 : 5;
+  const yTicks = [];
+  for (let v = Math.ceil(minD/yStep)*yStep; v <= maxD; v += yStep) yTicks.push(v);
+
+  function yPx(v) { return TOP + CHART_H - ((v - minD) / yRange) * CHART_H; }
+  function xPx(i) { return i * DAY_W + DAY_W / 2; }
+
+  const days = buildDays(firstDate, totalDays, rideMap).map(d => ({ ...d, ride: d.data }));
+  const monthBounds = buildMonthBoundaries(days);
+  const rideDays = days.filter(d => d.ride);
+
+  const maPts = [];
+  for (let i = 0; i <= lastRideIdx && i < days.length; i++) {
+    const win = days.slice(Math.max(0, i-13), i+1).filter(d => d.ride);
+    if (win.length >= 2) {
+      const avg = win.reduce((s,d) => s + d.ride.distance_km, 0) / win.length;
+      maPts.push(`${xPx(i)},${yPx(avg)}`);
+    }
+  }
+
+  const svgW = totalDays * DAY_W + 8;
+  const svgH = TOP + CHART_H + BOT;
+
+  const todayMonth = new Date().toISOString().slice(0,7);
+
+
+  return (
+    <div className="fu2 glass" style={{ padding:"14px 0 14px", marginBottom:14 }}>
+      <div style={{ padding:"0 16px 10px", display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+        <Lbl style={{ marginBottom:0 }}>Cycling</Lbl>
+
+      </div>
+      <div style={{ display:"flex" }}>
+        <svg width={Y_W} height={svgH} style={{ flexShrink:0, display:"block" }}>
+          <text x={Y_W-6} y={TOP-8} textAnchor="end" fontSize={7} fill="rgba(255,255,255,0.4)" fontFamily="DM Mono,monospace">km</text>
+          <line x1={Y_W-1} y1={TOP} x2={Y_W-1} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+          {yTicks.map(v => (
+            <g key={v}>
+              <text x={Y_W-6} y={yPx(v)+3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.65)" fontFamily="DM Mono,monospace">{v}</text>
+              <line x1={Y_W-3} y1={yPx(v)} x2={Y_W} y2={yPx(v)} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+            </g>
+          ))}
+        </svg>
+        <div
+          ref={el => { if (el && !scrollRef.current) { el.scrollLeft = todayIdx * DAY_W - el.clientWidth / 2; scrollRef.current = el; } }}
+          data-chartscroll="1"
+
+          style={{ overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", flex:1 }}
+        >
+          <svg width={svgW} height={svgH} style={{ display:"block", overflow:"visible" }}>
+            {yTicks.map(v => (
+              <line key={v} x1={0} y1={yPx(v)} x2={svgW} y2={yPx(v)} stroke="rgba(255,255,255,0.08)" strokeWidth={1}/>
+            ))}
+            <line x1={0} y1={TOP+CHART_H} x2={svgW} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+            {monthBounds.map((m, mi) => (
+              <g key={mi}>
+                {mi > 0 && <line x1={m.lineX} y1={TOP-18} x2={m.lineX} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.12)" strokeWidth={1} strokeDasharray="3 3"/>}
+                <text x={m.midX} y={TOP-7} textAnchor="middle" fontSize={10} fontWeight={600} fill="rgba(100,160,220,0.9)" fontFamily="DM Mono,monospace">{m.label}</text>
+              </g>
+            ))}
+            {days.map(day => (
+              <g key={day.key}>
+                <line x1={xPx(day.i)} y1={TOP+CHART_H} x2={xPx(day.i)} y2={TOP+CHART_H+4} stroke="rgba(255,255,255,0.15)" strokeWidth={1}/>
+                <text x={xPx(day.i)} y={TOP+CHART_H+13} textAnchor="middle" fontSize={7} fill="rgba(255,255,255,0.45)" fontFamily="DM Mono,monospace">{day.dayNum}</text>
+              </g>
+            ))}
+            {rideDays.length > 1 && (
+              <polyline points={rideDays.map(d=>`${xPx(d.i)},${yPx(d.ride.distance_km)}`).join(" ")} fill="none" stroke={DUSK} strokeWidth={1.5} opacity={0.7}/>
+            )}
+            {rideDays.map(day => (
+              <circle key={day.key} cx={xPx(day.i)} cy={yPx(day.ride.distance_km)} r={2.5} fill={DUSK} opacity={0.9}/>
+            ))}
+            {maPts.length > 1 && (
+              <polyline points={maPts.join(" ")} fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth={1.5} strokeDasharray="5 3"/>
+            )}
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MOOD CHART ───────────────────────────────────────────────────────────────
+function MoodChart({ moodEntries }) {
+
+  const scrollRef = useRef(null);
+
+  if (moodEntries.length <= 1) return (
+    <div className="fu2 glass" style={{ padding:"16px 18px", marginBottom:14 }}>
+      <Lbl>Mood</Lbl>
+      <div style={{ fontSize:12, color:TEXT2, fontStyle:"italic" }}>Log mood in Dusk to see your trend</div>
+    </div>
+  );
+
+  const CHART_H = 130, Y_W = 28, TOP = 30, BOT = 20;
+  const firstDate = new Date(moodEntries[0][0]);
+  const today = new Date();
+  const totalDays = Math.round((today - firstDate) / 86400000) + 1;
+  const todayIdx  = totalDays - 1;
+
+  const moodMap = {};
+  moodEntries.forEach(([k, d]) => { moodMap[k] = d.mood; });
+
+  function yPx(v) { return TOP + CHART_H - ((v - 0) / 10) * CHART_H; }
+  function xPx(i) { return i * DAY_W + DAY_W / 2; }
+
+  const days = buildDays(firstDate, totalDays, moodMap).map(d => ({ ...d, mood: d.data }));
+  const monthBounds = buildMonthBoundaries(days);
+
+  function buildSegs(getter) {
+    const segs = []; let seg = [];
+    days.forEach(day => {
+      const v = day.mood ? getter(day.mood) : null;
+      if (v != null) seg.push({ i: day.i, v });
+      else { if (seg.length > 1) segs.push([...seg]); seg = []; }
+    });
+    if (seg.length > 1) segs.push(seg);
+    return segs;
+  }
+
+  const happySegs   = buildSegs(m => m.happiness);
+  const anxietySegs = buildSegs(m => m.anxiety);
+  const yTicks = [2, 4, 6, 8, 10];
+  const svgW = totalDays * DAY_W + 8;
+  const svgH = TOP + CHART_H + BOT;
+
+
+
+  return (
+    <div className="fu2 glass" style={{ padding:"14px 0 14px", marginBottom:14 }}>
+      <div style={{ padding:"0 16px 10px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <Lbl style={{ marginBottom:0 }}>Mood</Lbl>
+
+      </div>
+      <div style={{ display:"flex" }}>
+        <svg width={Y_W} height={svgH} style={{ flexShrink:0, display:"block" }}>
+          <line x1={Y_W-1} y1={TOP} x2={Y_W-1} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+          {yTicks.map(v => (
+            <g key={v}>
+              <text x={Y_W-4} y={yPx(v)+3} textAnchor="end" fontSize={8} fill="rgba(255,255,255,0.55)" fontFamily="DM Mono,monospace">{v}</text>
+              <line x1={Y_W-3} y1={yPx(v)} x2={Y_W} y2={yPx(v)} stroke="rgba(255,255,255,0.2)" strokeWidth={1}/>
+            </g>
+          ))}
+        </svg>
+        <div
+          ref={el => { if (el && !scrollRef.current) { el.scrollLeft = todayIdx * DAY_W - el.clientWidth / 2; scrollRef.current = el; } }}
+          data-chartscroll="1"
+
+          style={{ overflowX:"auto", overflowY:"hidden", WebkitOverflowScrolling:"touch", flex:1 }}
+        >
+          <svg width={svgW} height={svgH} style={{ display:"block", overflow:"visible" }}>
+            {yTicks.map(v => (
+              <line key={v} x1={0} y1={yPx(v)} x2={svgW} y2={yPx(v)} stroke="rgba(255,255,255,0.06)" strokeWidth={1}/>
+            ))}
+            <line x1={0} y1={TOP+CHART_H} x2={svgW} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.25)" strokeWidth={1}/>
+            {monthBounds.map((m, mi) => (
+              <g key={mi}>
+                {mi > 0 && <line x1={m.lineX} y1={TOP-18} x2={m.lineX} y2={TOP+CHART_H} stroke="rgba(255,255,255,0.12)" strokeWidth={1} strokeDasharray="3 3"/>}
+                <text x={m.midX} y={TOP-7} textAnchor="middle" fontSize={10} fontWeight={600} fill="rgba(180,180,255,0.85)" fontFamily="DM Mono,monospace">{m.label}</text>
+              </g>
+            ))}
+            {days.map(day => (
+              <g key={day.key}>
+                <line x1={xPx(day.i)} y1={TOP+CHART_H} x2={xPx(day.i)} y2={TOP+CHART_H+4} stroke="rgba(255,255,255,0.12)" strokeWidth={1}/>
+                <text x={xPx(day.i)} y={TOP+CHART_H+13} textAnchor="middle" fontSize={7} fill="rgba(255,255,255,0.4)" fontFamily="DM Mono,monospace">{day.dayNum}</text>
+              </g>
+            ))}
+            {happySegs.map((seg,si) => (
+              <polyline key={"h"+si} points={seg.map(p=>`${xPx(p.i)},${yPx(p.v)}`).join(" ")} fill="none" stroke={DAWN} strokeWidth={2} opacity={0.85}/>
+            ))}
+            {days.filter(d=>d.mood?.happiness!=null).map(day => (
+              <circle key={"hd"+day.key} cx={xPx(day.i)} cy={yPx(day.mood.happiness)} r={3} fill={DAWN} opacity={0.9}/>
+            ))}
+            {anxietySegs.map((seg,si) => (
+              <polyline key={"a"+si} points={seg.map(p=>`${xPx(p.i)},${yPx(p.v)}`).join(" ")} fill="none" stroke={DANGER} strokeWidth={2} opacity={0.75}/>
+            ))}
+            {days.filter(d=>d.mood?.anxiety!=null).map(day => (
+              <circle key={"ad"+day.key} cx={xPx(day.i)} cy={yPx(day.mood.anxiety)} r={3} fill={DANGER} opacity={0.9}/>
+            ))}
+          </svg>
+        </div>
+      </div>
+      <div style={{ display:"flex", gap:16, padding:"8px 16px 0", justifyContent:"center" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <div style={{ width:16, height:2, background:DAWN, borderRadius:1 }}/>
+          <span style={{ fontSize:10, color:TEXT2 }}>Happiness</span>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <div style={{ width:16, height:2, background:DANGER, borderRadius:1 }}/>
+          <span style={{ fontSize:10, color:TEXT2 }}>Anxiety</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TabProfile({ dayData, setDayData }) {
+  const [dayBoundary, setDayBoundary] = useState(4);
+  const [lastBackup] = useState(null);
+  const [backfillDay, setBackfillDay] = useState(null);
+  const [backfillWeight, setBackfillWeight] = useState("");
+  const [rideDay, setRideDay] = useState(null);
+  const [rideForm, setRideForm] = useState({ distance:"", time:"" });
+  const [calOffset, setCalOffset] = useState(0);
+
+
+
+  // Weight data from dayData
+  const weightEntries = Object.entries(dayData)
+    .filter(([, d]) => d.weight != null)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const weights = weightEntries.map(([, d]) => d.weight);
+  const minW = weights.length ? Math.min(...weights) : 170;
+  const maxW = weights.length ? Math.max(...weights) : 200;
+
+  const rideEntries = Object.entries(dayData)
+    .filter(([, d]) => d.ride && d.ride.distance_km != null)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const moodEntries = Object.entries(dayData)
+    .filter(([, d]) => d.mood && d.mood.happiness != null)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  const importRef = useRef(null);
+  const [lastBackupTime, setLastBackupTime] = useState(null);
+
+  function exportData() {
+    const blob = new Blob([JSON.stringify({ appName:"meridian", exportedAt:new Date().toISOString(), dayData }, null, 2)], { type:"application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `meridian-export-${new Date().toISOString().slice(0,10)}.json`; a.click();
+    setLastBackupTime(new Date().toISOString());
+  }
+
+  function importData(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (parsed.dayData) {
+          setDayData(prev => ({ ...prev, ...parsed.dayData }));
+          alert("Import successful — " + Object.keys(parsed.dayData).length + " days loaded.");
+        } else {
+          alert("Invalid file — no dayData found.");
+        }
+      } catch {
+        alert("Failed to parse file.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  const daysSinceBackup = lastBackupTime ? Math.floor((Date.now() - new Date(lastBackupTime)) / 86400000) : null;
+  const backupColor = daysSinceBackup == null ? TEXT2 : daysSinceBackup > 14 ? DANGER : daysSinceBackup > 7 ? DAWN : "#4eae7a";
+
+  return (
+    <TabWrap>
+      <Orbs />
+      <div style={{ padding:"28px 22px 0" }}>
+        <PageHeader label="" title="Profile" />
+        <Divider />
+
+        {/* Monthly Summary */}
+        {(() => {
+          const monthMap = {};
+          weightEntries.forEach(([k, d]) => {
+            const mo = k.slice(0,7);
+            if (!monthMap[mo]) monthMap[mo] = { weight:[], km:0, speeds:[], happy:[], anxiety:[], pages:0 };
+            monthMap[mo].weight.push(d.weight);
+          });
+          rideEntries.forEach(([k, d]) => {
+            const mo = k.slice(0,7);
+            if (!monthMap[mo]) monthMap[mo] = { weight:[], km:0, speeds:[], happy:[], anxiety:[], pages:0 };
+            monthMap[mo].km += d.ride.distance_km || 0;
+            if (d.ride.speed_kmh) monthMap[mo].speeds.push(d.ride.speed_kmh);
+          });
+          Object.entries(dayData).forEach(([k, d]) => {
+            const mo = k.slice(0,7);
+            if (!monthMap[mo]) monthMap[mo] = { weight:[], km:0, speeds:[], happy:[], anxiety:[], pages:0 };
+            // Count pages from dusk routine stored in dayData
+            if (d.pagesRead) monthMap[mo].pages += d.pagesRead;
+          });
+          moodEntries.forEach(([k, d]) => {
+            const mo = k.slice(0,7);
+            if (!monthMap[mo]) monthMap[mo] = { weight:[], km:0, speeds:[], happy:[], anxiety:[], pages:0 };
+            if (d.mood && d.mood.happiness != null) monthMap[mo].happy.push(d.mood.happiness);
+            if (d.mood && d.mood.anxiety != null) monthMap[mo].anxiety.push(d.mood.anxiety);
+          });
+          const months = Object.keys(monthMap).sort();
+          if (!months.length) return null;
+          return (
+            <div className="fu1 glass" style={{ padding:"14px 16px", marginBottom:14 }}>
+              <Lbl>Monthly Summary</Lbl>
+              <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch", marginLeft:-16, marginRight:-16, paddingLeft:16, paddingRight:16 }} data-chartscroll="1">
+                <div style={{ display:"flex", gap:10, paddingBottom:4, width:"max-content" }}>
+                  {months.map(mo => {
+                    const d = monthMap[mo];
+                    const label = new Date(mo+"-15").toLocaleDateString("en-US", { month:"short", year:"2-digit" });
+                    const avgW = d.weight.length ? Math.round(d.weight.reduce((a,b)=>a+b,0)/d.weight.length*10)/10 : null;
+                    const km = d.km > 0 ? Math.round(d.km*10)/10 : null;
+                    const avgH = d.happy.length ? Math.round(d.happy.reduce((a,b)=>a+b,0)/d.happy.length*10)/10 : null;
+                    const avgA = d.anxiety.length ? Math.round(d.anxiety.reduce((a,b)=>a+b,0)/d.anxiety.length*10)/10 : null;
+                    return (
+                      <div key={mo} style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.16)", borderRadius:10, padding:"10px 12px", minWidth:90, flexShrink:0 }}>
+                        <div style={{ fontSize:9, fontWeight:700, letterSpacing:"0.12em", color:"#9090b8", marginBottom:8, textTransform:"uppercase" }}>{label}</div>
+                        {avgW != null && <div style={{ fontSize:12, color:"#f0a830", fontFamily:"'DM Mono',monospace", marginBottom:3 }}>⚖ {avgW}</div>}
+                        {km != null && <div style={{ fontSize:12, color:"#6ab0e0", fontFamily:"'DM Mono',monospace", marginBottom:3 }}>🚲 {km}km</div>}
+                        {d.speeds.length > 0 && <div style={{ fontSize:11, color:"rgba(106,176,224,0.7)", fontFamily:"'DM Mono',monospace", marginBottom:3 }}>⚡ {Math.round(d.speeds.reduce((a,b)=>a+b,0)/d.speeds.length*10)/10}km/h</div>}
+                        {d.pages > 0 && <div style={{ fontSize:11, color:"rgba(180,180,255,0.8)", fontFamily:"'DM Mono',monospace", marginBottom:2 }}>📖 {d.pages}p</div>}
+                        {avgH != null && <div style={{ fontSize:11, color:"rgba(240,168,48,0.8)", fontFamily:"'DM Mono',monospace", marginBottom:2 }}>☺ {avgH}</div>}
+                        {avgA != null && <div style={{ fontSize:11, color:"rgba(224,90,78,0.8)", fontFamily:"'DM Mono',monospace" }}>↑ {avgA}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Weight Chart */}
+        <WeightChart weightEntries={weightEntries} minW={minW} maxW={maxW} />
+
+        {/* Cycling Chart */}
+        <CyclingChart rideEntries={rideEntries} />
+
+        {/* Mood Chart */}
+        <MoodChart moodEntries={moodEntries} />
+
+        {/* Monthly Calendar */}
+        {(() => {
+          const now = new Date();
+          const calDate = new Date(now.getFullYear(), now.getMonth() + calOffset, 1);
+          const year = calDate.getFullYear();
+          const month = calDate.getMonth();
+          const firstDay = new Date(year, month, 1).getDay();
+          const daysInMonth = new Date(year, month + 1, 0).getDate();
+          const logicalToday = getLogicalDate(1);
+          const monthLabel = calDate.toLocaleDateString("en-US", { month:"long", year:"numeric" });
+          const cells = [];
+          for (let i = 0; i < firstDay; i++) cells.push(null);
+          for (let d = 1; d <= daysInMonth; d++) {
+            cells.push(`${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`);
+          }
+          function isDayComplete(dateKey) {
+            const d = dayData[dateKey];
+            return d && d.dawn === "full" && d.dusk === "full";
+          }
+          function getDots(dateKey) {
+            const d = dayData[dateKey] || {};
+            return { dawn: d.dawn || "none", dusk: d.dusk || "none" };
+          }
+          return (
+            <div className="fu1 glass" style={{ padding:"16px 18px", marginBottom:14 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <button onClick={() => { setBackfillDay(null); setCalOffset(o => o - 1); }}
+                  style={{ background:"none", border:"none", color:TEXT2, fontSize:18, padding:"0 8px", cursor:"pointer", lineHeight:1 }}>‹</button>
+                <div style={{ fontSize:11, fontWeight:600, letterSpacing:"0.12em", textTransform:"uppercase", color:TEXT2 }}>
+                  {monthLabel}
+                </div>
+                <button onClick={() => { setBackfillDay(null); setCalOffset(o => Math.min(0, o + 1)); }}
+                  style={{ background:"none", border:"none", color: calOffset >= 0 ? "rgba(255,255,255,0.1)" : TEXT2, fontSize:18, padding:"0 8px", cursor: calOffset >= 0 ? "default" : "pointer", lineHeight:1 }}>›</button>
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:3, marginBottom:5 }}>
+                {["S","M","T","W","T","F","S"].map((d,i) => (
+                  <div key={i} style={{ textAlign:"center", fontSize:8, fontWeight:600, color:TEXT3, letterSpacing:"0.08em" }}>{d}</div>
+                ))}
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:3 }}>
+                {cells.map((dateKey, i) => {
+                  if (!dateKey) return <div key={`e-${i}`} />;
+                  const isToday   = dateKey === logicalToday;
+                  const isFuture  = dateKey > logicalToday;
+                  const dots      = getDots(dateKey);
+                  const dayNum    = parseInt(dateKey.slice(8));
+                  const hasWeight = dayData[dateKey]?.weight != null;
+                  const isEditing = backfillDay === dateKey;
+                  return (
+                    <div key={dateKey}
+                      onClick={() => {
+                        if (isFuture) return;
+                        if (isEditing) { setBackfillDay(null); setBackfillWeight(""); }
+                        else {
+                          setBackfillDay(dateKey);
+                          setBackfillWeight(dayData[dateKey]?.weight ? String(dayData[dateKey].weight) : "");
+                        }
+                      }}
+                      style={{
+                        aspectRatio:"1", borderRadius:8,
+                        background: isEditing ? "rgba(240,168,48,0.18)" : isFuture ? "transparent" : "rgba(255,255,255,0.07)",
+                        border:`1px solid ${isEditing ? "rgba(240,168,48,0.4)" : isToday ? "rgba(255,255,255,0.25)" : isFuture ? "transparent" : BORDER}`,
+                        display:"flex", flexDirection:"column",
+                        alignItems:"center", justifyContent:"center",
+                        gap:3, opacity: isFuture ? 0.08 : 1,
+                        cursor: isFuture ? "default" : "pointer",
+                        transition:"all 0.15s",
+                      }}>
+                      <span style={{ fontSize:7, fontWeight: isToday ? 700 : 400, color: isEditing ? DAWN : isToday ? TEXT : TEXT2, lineHeight:1 }}>{dayNum}</span>
+                      {hasWeight && !isEditing && (
+                        <div style={{ width:4, height:4, borderRadius:"50%", background:DAWN, boxShadow:`0 0 4px ${DAWN}80` }} />
+                      )}
+                      {!isFuture && !hasWeight && (dots.dawn === "full" || dots.dusk === "full") && (
+                        <div style={{ display:"flex", gap:2 }}>
+                          {dots.dawn === "full" && <div style={{ width:4, height:4, borderRadius:"50%", background:DAWN, boxShadow:`0 0 4px ${DAWN}80` }} />}
+                          {dots.dusk === "full" && <div style={{ width:4, height:4, borderRadius:"50%", background:DUSK, boxShadow:`0 0 4px ${DUSK}80` }} />}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Unified day entry panel — weight + ride */}
+              {backfillDay && (() => {
+                const dayEntry = dayData[backfillDay] || {};
+                const hasWeight = dayEntry.weight != null;
+                const hasRide   = dayEntry.ride != null;
+                return (
+                  <div className="fi" style={{ marginTop:14, padding:"14px", background:SURF2, borderRadius:12, border:`1px solid ${BORDER2}` }}>
+                    {/* Header */}
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                      <div style={{ fontSize:12, fontWeight:600, color:TEXT }}>{backfillDay}</div>
+                      <button onClick={() => { setBackfillDay(null); setBackfillWeight(""); setRideForm({ distance:"", time:"" }); }}
+                        style={{ fontSize:18, color:TEXT2, background:"none", border:"none", cursor:"pointer", lineHeight:1 }}>×</button>
+                    </div>
+
+                    {/* Weight section */}
+                    <div style={{ marginBottom:14 }}>
+                      <div style={{ fontSize:9, color:TEXT2, letterSpacing:"0.1em", marginBottom:6 }}>WEIGHT</div>
+                      <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                        <input type="number" placeholder="lbs" value={backfillWeight}
+                          onChange={e => setBackfillWeight(e.target.value)}
+                          style={{ width:90, padding:"8px 10px", background:"rgba(255,255,255,0.06)", border:`1px solid ${BORDER2}`, borderRadius:10, color:TEXT, fontSize:14, outline:"none" }}
+                        />
+                        <span style={{ fontSize:12, color:TEXT2 }}>lbs</span>
+                        {hasWeight && <span style={{ fontSize:11, color:DAWN }}>current: {dayEntry.weight}</span>}
+                        <button onClick={() => {
+                          const w = parseFloat(backfillWeight);
+                          if (!w) return;
+                          setDayData(prev => ({ ...prev, [backfillDay]: { ...(prev[backfillDay] || {}), weight: w } }));
+                          setBackfillWeight("");
+                        }} style={{ padding:"7px 14px", borderRadius:8, background:`${DAWN}20`, border:`1px solid ${DAWN}40`, color:DAWN, fontSize:12, cursor:"pointer" }}>Save</button>
+                        {hasWeight && <button onClick={() => {
+                          setDayData(prev => { const d = {...(prev[backfillDay]||{})}; delete d.weight; return {...prev, [backfillDay]:d}; });
+                          setBackfillWeight("");
+                        }} style={{ padding:"7px 10px", borderRadius:8, background:"rgba(224,90,78,0.1)", border:"1px solid rgba(224,90,78,0.3)", color:DANGER, fontSize:12, cursor:"pointer" }}>Del</button>}
+                      </div>
+                    </div>
+
+                    {/* Divider */}
+                    <div style={{ height:1, background:`rgba(255,255,255,0.06)`, marginBottom:14 }} />
+
+                    {/* Ride section */}
+                    <div>
+                      <div style={{ fontSize:9, color:TEXT2, letterSpacing:"0.1em", marginBottom:6 }}>RIDE</div>
+                      {hasRide && (
+                        <div style={{ fontSize:11, color:DUSK, marginBottom:8, fontFamily:"'DM Mono',monospace" }}>
+                          {dayEntry.ride.distance_km}km · {dayEntry.ride.time} · {dayEntry.ride.speed_kmh} km/h
+                        </div>
+                      )}
+                      <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:9, color:TEXT3, marginBottom:3 }}>KM</div>
+                          <input type="number" placeholder="0.0" value={rideForm.distance}
+                            onChange={e => setRideForm(f => ({ ...f, distance: e.target.value }))}
+                            style={{ width:"100%", padding:"8px 8px", background:"rgba(255,255,255,0.06)", border:`1px solid ${BORDER2}`, borderRadius:8, color:TEXT, fontSize:13, outline:"none" }}
+                          />
+                        </div>
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:9, color:TEXT3, marginBottom:3 }}>TIME</div>
+                          <input type="text" placeholder="24:31" value={rideForm.time} maxLength={5}
+                            onChange={e => {
+                              const digits = e.target.value.replace(/\D/g, "").slice(0, 4);
+                              const formatted = digits.length > 2 ? digits.slice(0,2)+":"+digits.slice(2) : digits;
+                              setRideForm(f => ({ ...f, time: formatted }));
+                            }}
+                            style={{ width:"100%", padding:"8px 8px", background:"rgba(255,255,255,0.06)", border:`1px solid ${BORDER2}`, borderRadius:8, color:TEXT, fontSize:13, outline:"none", fontFamily:"'DM Mono',monospace" }}
+                          />
+                        </div>
+                        {/* Live speed */}
+                        <div style={{ flex:1 }}>
+                          <div style={{ fontSize:9, color:TEXT3, marginBottom:3 }}>KM/H</div>
+                          <div style={{ padding:"8px 8px", background:"rgba(255,255,255,0.03)", border:`1px solid ${BORDER}`, borderRadius:8, fontSize:13, color:DUSK, fontFamily:"'DM Mono',monospace", minHeight:36, display:"flex", alignItems:"center" }}>
+                            {(() => {
+                              const dist = parseFloat(rideForm.distance) || 0;
+                              const parts = (rideForm.time||"").split(":").map(Number);
+                              const hrs = parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) ? parts[0]/60 + parts[1]/3600 : 0;
+                              return dist > 0 && hrs > 0 ? Math.round((dist/hrs)*10)/10 : "—";
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        <button onClick={() => {
+                          if (!rideForm.distance && !rideForm.time) return;
+                          const dist = parseFloat(rideForm.distance) || null;
+                          const timeStr = rideForm.time || null;
+                          let speed_kmh = null;
+                          if (dist && timeStr) {
+                            const parts = timeStr.split(":").map(Number);
+                            const hrs = parts.length === 2 ? parts[0]/60 + parts[1]/3600 : parts.length === 3 ? parts[0] + parts[1]/60 + parts[2]/3600 : 0;
+                            if (hrs > 0) speed_kmh = Math.round((dist/hrs)*10)/10;
+                          }
+                          setDayData(prev => ({ ...prev, [backfillDay]: { ...(prev[backfillDay]||{}), ride:{ distance_km:dist, time:timeStr, speed_kmh } } }));
+                          setRideForm({ distance:"", time:"" });
+                        }} style={{ flex:1, padding:"8px", borderRadius:8, background:`${DUSK}20`, border:`1px solid ${DUSK}40`, color:DUSK, fontSize:12, cursor:"pointer" }}>
+                          {hasRide ? "Update Ride" : "Save Ride"}
+                        </button>
+                        {hasRide && <button onClick={() => {
+                          setDayData(prev => { const d = {...(prev[backfillDay]||{})}; delete d.ride; return {...prev, [backfillDay]:d}; });
+                          setRideForm({ distance:"", time:"" });
+                        }} style={{ padding:"8px 12px", borderRadius:8, background:"rgba(224,90,78,0.1)", border:"1px solid rgba(224,90,78,0.3)", color:DANGER, fontSize:12, cursor:"pointer" }}>Del</button>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })()}
+
+
+
+
+
+        {/* Export / Import */}
+        <div className="fu4 glass" style={{ padding:"16px 18px", marginBottom:14 }}>
+          <Lbl>Data</Lbl>
+          <div style={{ display:"flex", gap:10, marginBottom:10 }}>
+            <button onClick={exportData} style={{ flex:1, padding:"11px", borderRadius:10, background:"none", border:`1px solid ${BORDER}`, color:TEXT2, fontSize:12, letterSpacing:"0.06em" }}>
+              Export JSON
+            </button>
+            <button onClick={() => importRef.current.click()} style={{ flex:1, padding:"11px", borderRadius:10, background:"none", border:`1px solid ${BORDER}`, color:TEXT2, fontSize:12, letterSpacing:"0.06em" }}>
+              Import JSON
+            </button>
+            <input ref={importRef} type="file" accept=".json" onChange={importData} style={{ display:"none" }} />
+          </div>
+          <div style={{ fontSize:11, color:backupColor }}>
+            {daysSinceBackup == null ? "Never backed up — export now" : daysSinceBackup > 14 ? `Backup overdue — ${daysSinceBackup} days` : `Last backup: ${daysSinceBackup} days ago`}
+          </div>
+        </div>
+
+        {/* Account */}
+        <div className="fu4 glass" style={{ padding:"16px 18px" }}>
+          <Lbl>Account</Lbl>
+          <button onClick={onSignOut} style={{ width:"100%", padding:"11px", borderRadius:10, background:"rgba(224,90,78,0.06)", border:"1px solid rgba(224,90,78,0.25)", color:DANGER, fontSize:12 }}>
+            Sign Out
+          </button>
+          <div style={{ marginTop:10, fontSize:10, color:TEXT3, textAlign:"center" }}>
+            Meridian V1 · Sandbox Mode
+          </div>
+        </div>
+      </div>
+
+    </TabWrap>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NAV BAR
+// ═══════════════════════════════════════════════════════════════════════════════
+const NAV = [
+  { label:"Ember",   icon:"◈" },
+  { label:"Dawn",    icon:"◑" },
+  { label:"Dusk",    icon:"◐" },
+  { label:"Profile", icon:"○" },
+];
+
+function NavBar({ active, setTab }) {
+  return (
+    <div style={{
+      position:"fixed", bottom:0, left:"50%", transform:"translateX(-50%)",
+      width:390, background:"rgba(8,8,26,0.92)", backdropFilter:"blur(30px)",
+      WebkitBackdropFilter:"blur(30px)", borderTop:`1px solid ${BORDER}`,
+      display:"flex", alignItems:"center", justifyContent:"space-around",
+      padding:"10px 6px 28px", zIndex:100,
+    }}>
+      {NAV.map((tab, i) => (
+        <button key={i} onClick={() => setTab(i)} style={{
+          display:"flex", flexDirection:"column", alignItems:"center", gap:3,
+          background:"none", border:"none", padding:"3px 4px",
+          opacity: active === i ? 1 : 0.28, transition:"all 0.2s",
+        }}>
+          <div style={{
+            width:34, height:34, borderRadius:11,
+            background: active === i ? SURF2 : "none",
+            border: active === i ? `1px solid ${BORDER2}` : "1px solid transparent",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            transition:"all 0.2s",
+          }}>
+            <span style={{
+              fontSize:14,
+              color: active === i ? (i===1 ? DAWN : i===2 ? DUSK : TEXT) : TEXT2,
+            }}>{tab.icon}</span>
+          </div>
+          <span style={{ fontSize:7, fontWeight:600, letterSpacing:"0.1em", textTransform:"uppercase", color: active === i ? TEXT : TEXT2 }}>
+            {tab.label}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// APP ROOT
+// ═══════════════════════════════════════════════════════════════════════════════
+function App({ dayData, setDayData, onSignOut }) {
+  const [tab, setTab]       = useState(0);
+
+  // Reset checkboxes on new logical day, keep labels/types
+  const todayKey = getLogicalDate(1);
+  const [routineDay, setRoutineDay] = useState(todayKey);
+  const [dawnRoutine, setDawnRoutine] = useState(() => JSON.parse(JSON.stringify(MORNING_ROUTINE_DEFAULT)));
+  const [duskRoutine, setDuskRoutine] = useState(() => JSON.parse(JSON.stringify(NIGHT_ROUTINE_DEFAULT)));
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const newDay = getLogicalDate(1);
+      if (newDay !== routineDay) {
+        setRoutineDay(newDay);
+        setDawnRoutine(r => r.map(i => ({ ...i, done:false, value: i.type === "weight" ? "" : i.value })));
+        setDuskRoutine(r => r.map(i => ({ ...i, done:false, start:"", end:"", value:"" })));
+      }
+    }, 60000); // check every minute
+    return () => clearInterval(interval);
+  }, [routineDay]);
+  const touchStartX = useRef(null);
+  const touchStartY = useRef(null);
+
+  const stars = useRef(Array.from({ length:45 }).map(() => ({
+    w: Math.random() > 0.82 ? 2 : 1,
+    x: Math.random() * 100,
+    y: Math.random() * 65,
+    op: Math.random() * 0.16 + 0.03,
+  }))).current;
+
+  function handleTouchStart(e) {
+    // If touch started inside a horizontal scroll container, don't track for tab switch
+    let el = e.target;
+    while (el) {
+      if (el.dataset && el.dataset.chartscroll === "1") {
+        touchStartX.current = null;
+        return;
+      }
+      el = el.parentElement;
+    }
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+  }
+  function handleTouchEnd(e) {
+    if (touchStartX.current === null) return;
+    const dx = e.changedTouches[0].clientX - touchStartX.current;
+    const dy = e.changedTouches[0].clientY - touchStartY.current;
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 52) {
+      setTab(t => dx < 0 ? (t + 1) % 4 : (t - 1 + 4) % 4);
+    }
+    touchStartX.current = null; touchStartY.current = null;
+  }
+
+  const tabComponents = [
+    <TabChain   dayData={dayData} stars={stars} />,
+    <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
+    <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
+    <TabProfile dayData={dayData} setDayData={setDayData} />,
+  ];
+
+  return (
+    <div style={{ display:"flex", justifyContent:"center", minHeight:"100vh", background:"#000" }}>
+      <GlobalStyle />
+      <div
+        style={{ width:390, height:"100dvh", display:"flex", flexDirection:"column", background:BG, position:"relative", overflow:"hidden" }}
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
+        {tab !== 0 && <StarField stars={stars} />}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", position:"relative", zIndex:1, overflow:"hidden" }}>
+          {tabComponents[tab]}
+        </div>
+        <NavBar active={tab} setTab={setTab} />
+      </div>
+    </div>
+  );
+}
+
+
+    // ─── AUTH WRAPPER ───────────────────────────────────────────────────────────
+    function AuthGate() {
+      const [user, setUser]     = useState(null);
+      const [loading, setLoading] = useState(!IS_SANDBOX);
+      const [dayData, setDayDataState] = useState(null);
+      const uidRef = useRef(null);
+
+      // Wrap setDayData to also persist to storage
+      function setDayData(updater) {
+        setDayDataState(prev => {
+          const next = typeof updater === "function" ? updater(prev) : updater;
+          // Persist changed days
+          if (uidRef.current) {
+            Object.keys(next).forEach(date => {
+              if (!prev || JSON.stringify(prev[date]) !== JSON.stringify(next[date])) {
+                saveDay(uidRef.current, date, next[date]);
+              }
+            });
+          }
+          return next;
+        });
+      }
+
+      useEffect(() => {
+        if (IS_SANDBOX) {
+          uidRef.current = "local";
+          loadAllDays("local", data => setDayDataState(data));
+          setUser({ uid:"local", name:"Chadd" });
+          return;
+        }
+        const unsub = auth.onAuthStateChanged(u => {
+          setLoading(false);
+          if (u) {
+            uidRef.current = u.uid;
+            setUser(u);
+            loadAllDays(u.uid, data => setDayDataState(data));
+          } else {
+            setUser(null);
+          }
+        });
+        return unsub;
+      }, []);
+
+      function handleSignIn() {
+        const client = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: "email profile",
+          callback: async (resp) => {
+            if (resp.error) return;
+            const cred = firebase.auth.GoogleAuthProvider.credential(null, resp.access_token);
+            await auth.signInWithCredential(cred);
+          },
+        });
+        client.requestAccessToken();
+      }
+
+      function handleSignOut() {
+        if (!IS_SANDBOX) auth.signOut();
+        setUser(null);
+        setDayDataState(null);
+      }
+
+      if (loading) return (
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14 }}>
+          Loading…
+        </div>
+      );
+
+      if (!user) return (
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", gap:24 }}>
+          <div style={{ fontFamily:"'Playfair Display',serif", fontSize:42, fontWeight:900, color:"#eeeeff" }}>Meridian</div>
+          <div style={{ fontSize:13, color:"#9090b8" }}>Your daily operating system</div>
+          <button onClick={handleSignIn} style={{
+            marginTop:16, padding:"14px 32px", borderRadius:12,
+            background:"rgba(240,168,48,0.12)", border:"1px solid rgba(240,168,48,0.4)",
+            color:"#f0a830", fontSize:15, fontWeight:600, cursor:"pointer",
+            fontFamily:"sans-serif",
+          }}>Sign in with Google</button>
+          <div style={{ fontSize:10, color:"#5a5a80", marginTop:8 }}>
+            {IS_SANDBOX ? "Sandbox Mode" : `${APP_NAME} ${APP_VERSION} · ${BUILD_DATE}`}
+          </div>
+        </div>
+      );
+
+      if (!dayData) return (
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"100dvh", background:"#08081a", color:"#9090b8", fontSize:14 }}>
+          Loading your data…
+        </div>
+      );
+
+      return <App dayData={dayData} setDayData={setDayData} onSignOut={handleSignOut} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<AuthGate />);
+  </script>
+</body>
+</html>
