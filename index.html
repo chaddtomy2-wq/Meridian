@@ -15,6 +15,9 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #000; overflow: hidden; }
@@ -1893,7 +1896,7 @@ function MoodChart({ moodEntries }) {
   );
 }
 
-function TabProfile({ dayData, setDayData }) {
+function TabProfile({ dayData, setDayData, onSignOut }) {
   const [dayBoundary, setDayBoundary] = useState(4);
   const [lastBackup] = useState(null);
   const [backfillDay, setBackfillDay] = useState(null);
@@ -2364,7 +2367,7 @@ function App({ dayData, setDayData, onSignOut }) {
     <TabChain   dayData={dayData} stars={stars} />,
     <TabDawn    dayData={dayData} setDayData={setDayData} routine={dawnRoutine} setRoutine={setDawnRoutine} />,
     <TabDusk    dayData={dayData} setDayData={setDayData} setTab={setTab} stars={stars} routine={duskRoutine} setRoutine={setDuskRoutine} />,
-    <TabProfile dayData={dayData} setDayData={setDayData} />,
+    <TabProfile dayData={dayData} setDayData={setDayData} onSignOut={onSignOut} />,
   ];
 
   return (
@@ -2430,11 +2433,16 @@ function App({ dayData, setDayData, onSignOut }) {
       }, []);
 
       function handleSignIn() {
-        const provider = new firebase.auth.GoogleAuthProvider();
-        auth.signInWithPopup(provider).catch(err => {
-          console.error("Sign in error:", err);
-          alert("Sign in failed: " + err.message);
+        const client = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: "email profile",
+          callback: async (resp) => {
+            if (resp.error) { alert("Sign in error: " + resp.error); return; }
+            const cred = firebase.auth.GoogleAuthProvider.credential(null, resp.access_token);
+            auth.signInWithCredential(cred).catch(err => alert("Firebase error: " + err.message));
+          },
         });
+        client.requestAccessToken();
       }
 
       function handleSignOut() {
